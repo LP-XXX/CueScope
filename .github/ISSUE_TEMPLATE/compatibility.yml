@@ -1,0 +1,38 @@
+name: 应用兼容性
+description: 报告某个软件、布局和采集后端下的可复现结果
+title: "[兼容性] "
+body:
+  - type: markdown
+    attributes:
+      value: "请用临时文档、合成聊天或自制样例复现。不要提交聊天截图、窗口标题、群名、账号或原始诊断文件。"
+  - type: input
+    id: versions
+    attributes:
+      label: CueScope、Windows 和目标应用的版本
+      placeholder: "例如 v0.3.0、Windows 11 x64、某编辑器 1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: 内容模式
+      options:
+        - 通用文字 · 逐行
+        - 通用文字 · 指定文本块
+        - 微信聊天预设
+    validations:
+      required: true
+  - type: input
+    id: capture
+    attributes:
+      label: 采集后端、显示缩放与窗口状态
+      placeholder: "例如 WGC、150%、完全遮挡后恢复；不确定的项目可写未知"
+    validations:
+      required: true
+  - type: textarea
+    id: observation
+    attributes:
+      label: 测试步骤、样例文字与实际结果
+      description: "说明是否成功预览、文字如何分段，以及命中与去重是否符合预期。"
+    validations:
+      required: true
