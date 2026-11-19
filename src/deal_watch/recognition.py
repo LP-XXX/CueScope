@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS records (
     char_matches TEXT NOT NULL,
     created_at REAL NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_records_created ON records(created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_records_by_time ON records(created_at);
+DROP INDEX IF EXISTS idx_records_created;
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
@@ -107,14 +108,18 @@ class RecognitionStore:
                             boundary_uncertain, matched_keywords, decision,
                             char_matches, created_at
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        [tuple(row[key] for key in _RECORD_FIELDS) for row in rows],
+                        [tuple(row[key] for key in _RECORD_FIELDS) for row in reversed(rows)],
                     )
                     self._trim_locked()
                 actual = self._conn.execute(
-                    "SELECT * FROM records ORDER BY created_at DESC, id DESC LIMIT ?",
+                    "SELECT * FROM records ORDER BY created_at DESC, rowid DESC LIMIT ?",
                     (self.limit,),
                 ).fetchall()
-                if len(actual) != len(rows) or self._summary(actual) != self._summary(rows):
+                # Historical selection uses the legacy id tie-break. Compare the
+                # retained contents independently of rowids assigned by older runs.
+                actual_digest = self._summary(sorted(actual, key=lambda row: row["id"]))
+                source_digest = self._summary(sorted(rows, key=lambda row: row["id"]))
+                if len(actual) != len(rows) or actual_digest != source_digest:
                     raise RuntimeError("旧识别记录迁移校验失败，原数据库已保留")
                 with self._conn:
                     self._conn.execute(
@@ -201,7 +206,7 @@ class RecognitionStore:
     def _trim_locked(self) -> None:
         self._conn.execute(
             """DELETE FROM records WHERE id IN (
-                SELECT id FROM records ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?
+                SELECT id FROM records ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?
             )""",
             (self.limit,),
         )
@@ -253,7 +258,7 @@ class RecognitionStore:
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
         with self._lock:
             rows = self._conn.execute(
-                f"SELECT * FROM records {where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+                f"SELECT * FROM records {where} ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
                 (*values, limit, offset),
             ).fetchall()
         return [dict(row) for row in rows]

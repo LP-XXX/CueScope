@@ -17,7 +17,7 @@ def hash_stream(stream) -> str:
     return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def verify_archive(archive: Path, *, smoke=False, commit=None) -> None:
+def verify_archive(archive: Path, *, smoke=False, commit=None) -> dict:
     match = re.fullmatch(r"CueScope-(\d+\.\d+\.\d+)-win-x64\.zip", archive.name)
     if not match:
         raise ValueError("Unexpected portable ZIP name")
@@ -61,6 +61,29 @@ def verify_archive(archive: Path, *, smoke=False, commit=None) -> None:
                 or info.get("capture_sha256") != expected.get("capture-component/DealWatchCapture.exe")
                 or info.get("source_snapshot_sha256") != expected.get("validation/source-snapshot.json")):
             raise ValueError("Build identity differs from the archived files")
+        source_commit = info.get("source_commit")
+        tag = info.get("release_tag")
+        if source_commit is not None and not re.fullmatch(r"[0-9a-f]{40}", str(source_commit)):
+            raise ValueError("Invalid recorded source commit")
+        if tag is not None and (not source_commit or not re.fullmatch(rf"v{re.escape(version)}(?:-rc\.[1-9]\d*)?", str(tag))):
+            raise ValueError("Invalid recorded release tag")
+        def evidence(stem, versioned=True):
+            name = stem + (f"-{version}" if versioned else "") + ".json"
+            return json.loads(bundle.read(entries["validation/" + name]))
+        regression = evidence("automated-tests", False)
+        counts = {key: regression["test_counts"][key] for key in ("tests", "failures", "errors", "skipped")}
+        checks = {item.get("name") for item in regression.get("checks", []) if item.get("passed") is True}
+        frozen = evidence("package-smoke")
+        capture = evidence("capture-component-self-test")
+        pool = evidence("capture-pool-self-test")
+        if (not all(type(n) is int and n >= 0 for n in counts.values()) or not counts["tests"]
+                or counts["failures"] or counts["errors"] or counts["skipped"] >= counts["tests"]
+                or not {"pytest", "ruff"} <= checks or regression.get("passed") is not True or frozen.get("passed") is not True
+                or frozen.get("frozen") is not True or frozen.get("qq_pairing_module") is not True
+                or capture.get("payload", {}).get("ok") is not True or pool.get("passed") is not True
+                or pool.get("captured_frames") != 0 or pool.get("remaining_processes") != 0
+                or pool.get("ready_workers") != 2):
+            raise ValueError("Required offline release checks are missing or failed")
         for name in ("README.md", "QUICK_START.md", "VALIDATION.md", "THIRD_PARTY_NOTICES.md"):
             markdown = bundle.read(entries[name]).decode("utf-8")
             for target in re.findall(r"\]\(([^)\s]+)\)", markdown):
@@ -81,15 +104,33 @@ def verify_archive(archive: Path, *, smoke=False, commit=None) -> None:
                 data = json.loads(report.read_text(encoding="utf-8"))
                 if data.get("passed") is not True or data.get("frozen") is not True or data.get("version") != version:
                     raise ValueError("Extracted program failed its offline self-check")
+    return {
+        "version": version, "tag": tag, "source_commit": source_commit,
+        "archive_filename": archive.name, "archive_sha256": expected_sidecar.split(" ", 1)[0],
+        "source_snapshot_sha256": info["source_snapshot_sha256"], "offline_test_counts": counts,
+        "ruff_passed": True,
+        "frozen_ocr_and_ui_self_check_passed": True, "qq_binding_offline_check_passed": True,
+        "capture_dependency_and_two_worker_shutdown_passed": True,
+        "archive_hashes_verified": True,
+        "field_validation_pending": ["target application compatibility and occlusion", "five-window scheduling",
+                                     "QQ/Feishu platform acceptance and phone visibility", "long-running stability"],
+    }
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--archive", type=Path, required=True)
     parser.add_argument("--commit", help="Require this exact source commit in the build identity")
+    parser.add_argument("--write-summary", action="store_true", help="Write a redacted verification summary beside the ZIP")
     parser.add_argument("--smoke", action="store_true", help="Run the extracted build's isolated self-check")
     args = parser.parse_args()
-    verify_archive(args.archive.resolve(), smoke=args.smoke, commit=args.commit)
+    archive = args.archive.resolve()
+    summary = verify_archive(archive, smoke=args.smoke, commit=args.commit)
+    sidecar = archive.with_suffix(".validation.json")
+    if args.write_summary:
+        sidecar.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8", newline="\n")
+    elif sidecar.exists() and json.loads(sidecar.read_text(encoding="utf-8")) != summary:
+        raise ValueError("External validation summary differs from the archived evidence")
     print(f"Verified {args.archive.name}")
 
 

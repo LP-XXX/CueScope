@@ -95,10 +95,23 @@ class DestinationCredentialStore:
 
     def __init__(self, data_dir: Path | None = None):
         self.path = (data_dir or default_data_dir()) / "notification-destinations.dpapi"
+        self.marker = self.path.with_suffix(".required")
+
+    def _mark_configured(self):
+        try:
+            with self.marker.open("xb") as marker:
+                marker.write(b"1\n")
+                marker.flush()
+                os.fsync(marker.fileno())
+        except FileExistsError:
+            pass
 
     def load(self) -> dict:
         if not self.path.exists():
+            if self.marker.exists():
+                raise OSError("曾保存的通知接收端配置文件缺失，已停止外发")
             return {}
+        self._mark_configured()
         value = json.loads(unprotect(self.path.read_bytes()).decode("utf-8"))
         if not isinstance(value, dict):
             raise ValueError("通知目标配置无效")
@@ -119,6 +132,9 @@ class DestinationCredentialStore:
                 os.fsync(handle.fileno())
             if unprotect(temporary.read_bytes()) != raw:
                 raise OSError("通知目标配置校验失败")
+            # Mark first so that even an interrupted replacement cannot be
+            # mistaken for a virgin install with implicit global recipients.
+            self._mark_configured()
             os.replace(temporary, self.path)
         finally:
             temporary.unlink(missing_ok=True)

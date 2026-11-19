@@ -29,7 +29,10 @@ class TaskOptions(QWidget):
         for key, label in CONTENT_MODES.items():
             self.mode.addItem(label, key)
         self.rules = QComboBox()
-        self.rules.addItem("兼容关键词（旧任务）", "")
+        self._has_keywords = bool(getattr(config, "keywords", []))
+        self.rules.addItem("兼容关键词（旧任务）" if self._has_keywords or existing else "暂不设规则，先保存选区", "")
+        self._active_groups = {g.id for g in getattr(config, "rule_groups", []) if g.enabled}
+        self._known_config = config is not None
         for group in getattr(config, "rule_groups", []):
             self.rules.addItem(group.name, group.id)
         self.quick_phrase = QLineEdit()
@@ -92,6 +95,8 @@ class TaskOptions(QWidget):
         }[self.mode.currentData()]
         if self.title_policy.currentData() == "window":
             text += " 切换页面后也会监测此窗口新显示的内容。"
+        if self.reminder_missing():
+            text += " 当前还没有有效提醒条件；填写上方短语或选择已启用的规则组。"
         self.hint.setText(text)
 
     def _changed(self, *_):
@@ -115,3 +120,9 @@ class TaskOptions(QWidget):
             return None
         return RuleGroup(name=text, id=self._group_id,
                          conditions=[RuleCondition(text, id=self._condition_id)])
+
+    def reminder_missing(self):
+        if not self._known_config or self.quick_phrase.text().strip():
+            return False
+        selected = self.rules.currentData()
+        return selected not in self._active_groups if selected else not self._has_keywords

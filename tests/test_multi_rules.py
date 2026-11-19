@@ -276,6 +276,7 @@ def test_local_event_does_not_require_or_enqueue_remote_delivery(storage):
     events = engine.process([message("failed")], "synthetic", now=10)
     assert len(events) == 1
     assert events[0].delivery_mode == "local"
+    assert engine.last_decisions[events[0].tracking_id].queue_state == "local"
     assert storage.queue_counts().get("pending", 0) == 0
     assert len(storage.list_events()) == 1
 

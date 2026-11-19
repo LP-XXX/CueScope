@@ -32,6 +32,17 @@ def archive_at(tmp_path, *, readme="[Guide](QUICK_START.md)", omit=None, stale_i
         "capture_sha256": digest("capture-component/DealWatchCapture.exe"),
         "source_snapshot_sha256": digest("validation/source-snapshot.json"),
     }).encode()
+    evidence = {
+        "automated-tests": {"passed": True, "test_counts": {"tests": 2, "failures": 0, "errors": 0, "skipped": 0},
+                            "checks": [{"name": "pytest", "passed": True}, {"name": "ruff", "passed": True}],
+                            "private_error": "synthetic-private-path"},
+        f"package-smoke-{version}": {"passed": True, "frozen": True, "qq_pairing_module": True},
+        f"capture-component-self-test-{version}": {"payload": {"ok": True}},
+        f"capture-pool-self-test-{version}": {"passed": True, "captured_frames": 0, "remaining_processes": 0,
+                                               "ready_workers": 2},
+    }
+    for name, report in evidence.items():
+        files[f"validation/{name}.json"] = json.dumps(report).encode()
     files["SHA256SUMS.txt"] = "".join(f"{digest(name)}  {name}\n" for name in files if name != omit).encode()
     with zipfile.ZipFile(archive, "w") as bundle:
         for name, data in files.items():
@@ -42,7 +53,11 @@ def archive_at(tmp_path, *, readme="[Guide](QUICK_START.md)", omit=None, stale_i
 
 
 def test_verify_zip_without_executing(tmp_path):
-    load("check_release").verify_archive(archive_at(tmp_path))
+    archive = archive_at(tmp_path)
+    summary = load("check_release").verify_archive(archive)
+    assert summary["archive_sha256"] == hashlib.sha256(archive.read_bytes()).hexdigest()
+    assert summary["offline_test_counts"]["tests"] == 2
+    assert "synthetic-private-path" not in json.dumps(summary)
 
 
 @pytest.mark.parametrize("options,reason", [

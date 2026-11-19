@@ -332,7 +332,7 @@ class ServiceTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             region = ready_region("合成区域", window_title="Synthetic", rect=Rect(0, 0, 300, 500))
-            config = AppConfig(regions=[region], keywords=["手机"], save_hit_images=False)
+            config = AppConfig(regions=[region], keywords=["手机", "普通消息"], save_hit_images=False)
             storage = Storage(Path(directory) / "single-tx.db")
             feedback = RecordingFeedback()
             service = MonitorService(
@@ -353,13 +353,14 @@ class ServiceTests(unittest.TestCase):
                 submit(2, ["普通消息", "手机 优惠 4999 元"])
                 self.assertEqual(len(feedback.batches), 2, "每帧只允许一次候选写入")
                 self.assertEqual(feedback.mark_calls, 0, "判断已随候选写入，不得再补一次事务")
+                self.assertEqual(list(feedback.batches[0]["decisions"].values()), ["baseline"])
                 latest = feedback.batches[-1]
                 self.assertEqual(latest["texts"], ["普通消息", "手机 优惠 4999 元"])
                 self.assertEqual(set(latest["tracking"]), set(latest["decisions"]))
                 self.assertEqual(
                     sorted(latest["decisions"].values()),
-                    ["not_matched", "queued"],
-                    "判断值必须原样落库（命中入队 / 未命中）",
+                    ["queued", "unchanged"],
+                    "静止命中与新入队命中必须可区分",
                 )
             finally:
                 service.stop()

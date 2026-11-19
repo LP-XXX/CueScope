@@ -5,8 +5,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import Counter
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import numpy as np
 from PySide6.QtCore import QPoint, QRect, Qt, QThread, Signal
@@ -693,8 +694,7 @@ class RegionEditDialog(QDialog):
         self.window_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.window_combo.setMinimumContentsLength(20)
         self.window_combo.setMinimumWidth(0)
-        for window in self.windows:
-            self.window_combo.addItem(window.title, window)
+        self._populate_window_combo()
         form.addRow("区域名称", self.alias)
         window_row = QHBoxLayout()
         window_row.addWidget(self.window_combo, 1)
@@ -905,13 +905,21 @@ class RegionEditDialog(QDialog):
         self.capture_status.setText("选择窗口后重新截取。")
         self._show_step(0)
 
+    def _populate_window_combo(self):
+        titles = Counter(window.title for window in self.windows)
+        for window in self.windows:
+            title = window.title
+            if titles[title] > 1:
+                process = PureWindowsPath(window.process_path).name or "进程未知"
+                title = f"{title} · {process} · 窗口 {window.hwnd:X}"
+            self.window_combo.addItem(title, window)
+
     def refresh_windows(self):
         previous = getattr(self.window_combo.currentData(), "hwnd", None)
         self.windows = WindowsWindows().list_windows()
         self.window_combo.blockSignals(True)
         self.window_combo.clear()
-        for window in self.windows:
-            self.window_combo.addItem(window.title, window)
+        self._populate_window_combo()
         for index, window in enumerate(self.windows):
             if window.hwnd == previous:
                 self.window_combo.setCurrentIndex(index)
@@ -1101,7 +1109,8 @@ class RegionEditDialog(QDialog):
                 hits = [m for m in messages if self.rules and self.rules.decide(m).matched_keywords]
                 self._preview_verified = True
                 self._preview_evidence = (generation, selection_generation, evidence)
-                self.capture_status.setText("请确认文字区域清晰、完整。")
+                self.capture_status.setText("选区可以保存。当前没有提醒条件；请返回第一步填写短语，或稍后配置规则。"
+                                           if self.task_options.reminder_missing() else "请确认文字区域清晰、完整。")
                 self.preview_result.setText(f"{len(messages)} 个内容单位 · 命中 {len(hits)} 条 · 预览不发送提醒\n"
                                             + preview_unit_lines(messages, self.rules))
         if image is not None and observation is not None:

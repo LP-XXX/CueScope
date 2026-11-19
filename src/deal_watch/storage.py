@@ -49,6 +49,7 @@ _OUTBOX = """
 CREATE TABLE IF NOT EXISTS outbox (
     event_id TEXT NOT NULL REFERENCES events(id),
     endpoint_id TEXT NOT NULL,
+    route_region_id TEXT NOT NULL DEFAULT '',
     payload TEXT NOT NULL,
     created_at REAL NOT NULL,
     state TEXT NOT NULL,
@@ -107,6 +108,7 @@ class Storage:
         self._owner = self
         self._endpoint_id = "legacy"
         self._routes: Callable[[str], tuple[str, ...]] = lambda _region_id: ("legacy",)
+        self._route_filter_enabled = False
         self._conn = sqlite3.connect(self.path, check_same_thread=False, timeout=10)
         self._conn.row_factory = sqlite3.Row
         try:
@@ -151,6 +153,8 @@ class Storage:
                 for name in ("next_part", "retry_exhausted"):
                     if name not in columns:
                         self._conn.execute(f"ALTER TABLE outbox ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
+                if "route_region_id" not in columns:
+                    self._conn.execute("ALTER TABLE outbox ADD COLUMN route_region_id TEXT NOT NULL DEFAULT ''")
             if old:
                 names = ["event_id", "payload", "created_at", "state", "attempts",
                          "next_attempt_at", "last_error", "updated_at", "next_part", "retry_exhausted"]
@@ -185,6 +189,7 @@ class Storage:
             by_region = routes
         with self._lock:
             self._owner._routes = by_region
+            self._owner._route_filter_enabled = True
 
     def for_destination(self, endpoint_id: str) -> Storage:
         """Get a dispatcher's view of this connection; the owning Storage closes it."""
@@ -314,15 +319,17 @@ class Storage:
                     existing
                     and 0 <= now - existing["first_enqueued_at"] < cooldown_seconds
                 )
-                routes = () if event.delivery_mode == "local" else tuple(dict.fromkeys(self._owner._routes(event.region_id)))
+                source = getattr(event, "route_region_id", "") or event.region_id
+                routes = () if event.delivery_mode == "local" else tuple(dict.fromkeys(self._owner._routes(source)))
                 if any(not isinstance(key, str) or not key or len(key) > 128 or key in ("legacy-unbound", "@local") for key in routes):
                     raise ValueError("通知目标无效")
                 local_only = not routes
                 end = self.quiet_hours.ends_at(now)
                 summarize = end is not None and self.quiet_hours.summary and event.region_id != "system"
                 initial_state = ("digest_counted" if summarize else "muted") if end is not None else "pending"
-                event.state = "duplicate" if duplicate else ("local" if local_only else initial_state)
+                event.state = "local" if local_only and end is None else initial_state
                 if duplicate:
+                    event.state = "duplicate"
                     event.duplicate_of = existing["first_event_id"]
                 cursor.execute(
                     """INSERT INTO events(
@@ -362,9 +369,9 @@ class Storage:
                     if not local_only:
                         cursor.executemany(
                             """INSERT INTO outbox(
-                                event_id, endpoint_id, payload, created_at, state, next_attempt_at, updated_at, retry_exhausted
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                            [(event.id, key, json.dumps(payload, ensure_ascii=False), now, initial_state,
+                                event_id, endpoint_id, route_region_id, payload, created_at, state, next_attempt_at, updated_at, retry_exhausted
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            [(event.id, key, source, json.dumps(payload, ensure_ascii=False), now, initial_state,
                               now, now, int(end is not None)) for key in routes],
                         )
                     if summarize:
@@ -411,6 +418,45 @@ class Storage:
                     (now, event_id, self._endpoint_id),
                 )
             self._bump_records_locked()
+
+    def _revoke_locked(self, event_id: str, endpoint_id: str) -> None:
+        self._conn.execute("""UPDATE outbox SET state=CASE
+            WHEN receipt!='' THEN 'forwarded' WHEN next_part>0 THEN 'partial'
+            WHEN state IN ('unknown','submitting') THEN 'unknown' ELSE 'revoked' END,
+            retry_exhausted=1, last_error='接收端授权已撤销，停止后续投递', updated_at=?
+            WHERE event_id=? AND endpoint_id=? AND retry_exhausted=0
+            AND state IN ('pending','unknown','submitting','forwarded')""", (time.time(), event_id, endpoint_id))
+        self._refresh_event_state(event_id)
+
+    def revoke_unselected_deliveries(self, routes_for_region: Callable[[str], tuple[str, ...]]) -> None:
+        """Cancel outgoing jobs removed by an explicit routing edit, including delayed retries."""
+        with self._lock:
+            with self._conn:
+                rows = self._conn.execute("""SELECT o.event_id, o.endpoint_id,
+                    COALESCE(NULLIF(o.route_region_id,''),e.region_id) AS source
+                    FROM outbox o JOIN events e ON e.id=o.event_id WHERE o.retry_exhausted=0
+                    AND o.state IN ('pending','unknown','submitting','forwarded')""").fetchall()
+                allowed = {source: set(routes_for_region(source)) for source in {row["source"] for row in rows}}
+                revoked = [row for row in rows if row["endpoint_id"] not in allowed[row["source"]]]
+                for row in revoked:
+                    self._revoke_locked(row["event_id"], row["endpoint_id"])
+            if revoked:
+                self._bump_records_locked()
+
+    def cancel_if_unauthorized(self, job: NotificationJob) -> bool:
+        """Evaluate current permissions again while waiting, including between parts."""
+        if not self._owner._route_filter_enabled:
+            return False
+        source = job.route_region_id or job.payload.get("region_id", "")
+        with self._lock:
+            if self._endpoint_id in self._owner._routes(source):
+                row = self._conn.execute("SELECT retry_exhausted FROM outbox WHERE event_id=? AND endpoint_id=?",
+                                         (job.event_id, self._endpoint_id)).fetchone()
+                return not row or bool(row[0])
+            with self._conn:
+                self._revoke_locked(job.event_id, self._endpoint_id)
+            self._bump_records_locked()
+            return True
 
     def mark_sent(self, event_id: str, now: float | None = None) -> None:
         self._finish(event_id, "sent", "", now)
@@ -460,7 +506,7 @@ class Storage:
             with self._conn:
                 self._conn.execute(
                     """UPDATE outbox SET state = ?, next_attempt_at = ?, last_error = ?, updated_at = ?
-                    WHERE event_id = ? AND endpoint_id=?""",
+                    WHERE event_id = ? AND endpoint_id=? AND retry_exhausted=0""",
                     (state, now + delay, error[:500], now, event_id, self._endpoint_id),
                 )
                 self._refresh_event_state(event_id)
@@ -669,4 +715,5 @@ class Storage:
             updated_at=row["updated_at"],
             receipt=row["receipt"],
             next_part=row["next_part"],
+            route_region_id=row["route_region_id"] or payload.get("region_id", ""),
         )

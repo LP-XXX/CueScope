@@ -81,7 +81,8 @@ def main() -> None:
     output = args.dist_root.resolve()
     output.mkdir(parents=True, exist_ok=True)
     archive = output / f"CueScope-{VERSION}-win-x64.zip"
-    if archive.exists() or archive.with_suffix(".zip.sha256").exists():
+    attachments = [archive, archive.with_suffix(".zip.sha256"), archive.with_suffix(".validation.json")]
+    if any(path.exists() for path in attachments):
         raise FileExistsError("Use a new destination directory to preserve earlier candidates")
     # Each attempt uses a fresh directory so stale reports cannot authorize a release.
     run = Path(tempfile.mkdtemp(prefix="run-", dir=output))
@@ -112,9 +113,16 @@ def main() -> None:
     staged_archive = run / archive.name
     tool("finalize_package.py", "--dist-root", run, "--archive", staged_archive, "--evidence-dir", evidence)
     provenance = ["--commit", commit] if commit else []
-    tool("check_release.py", "--archive", staged_archive, "--smoke", *provenance)
-    staged_archive.with_suffix(".zip.sha256").rename(archive.with_suffix(".zip.sha256"))
-    staged_archive.rename(archive)
+    tool("check_release.py", "--archive", staged_archive, "--smoke", "--write-summary", *provenance)
+    promoted = []
+    try:
+        for attachment in attachments:
+            (run / attachment.name).rename(attachment)
+            promoted.append(attachment)
+    except OSError:
+        for attachment in reversed(promoted):
+            attachment.rename(run / attachment.name)
+        raise
     print(f"Verified {archive.name}; evidence: {evidence}")
 
 

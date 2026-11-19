@@ -4,7 +4,7 @@ CueScope 在 Windows 上定时读取你圈选的窗口文字，遇到关心的�
 
 [下载 Windows x64 便携包（v0.3.0 候选版）](https://github.com/LP-XXX/CueScope/releases/tag/v0.3.0) · [创建第一条提醒](QUICK_START.md) · [查看兼容性](VALIDATION.md) · [报告问题](https://github.com/LP-XXX/CueScope/issues/new/choose)
 
-下载发行页 **Assets** 下的 `CueScope-0.3.0-win-x64.zip`，完整解压后运行 `CueScope.exe`。便携包已含 OCR 模型和运行环境，可直接使用本地记录与托盘提醒。飞书机器人是这个版本支持的远程渠道。**0.3.1 正在开发**；QQ 通知及其验证进度见[路线图](docs/ROADMAP.md)。
+下载发行页 **Assets** 下的 `CueScope-0.3.0-win-x64.zip`（约 245 MiB），完整解压后运行 `CueScope.exe`。便携包已含 OCR 模型和运行环境，可直接使用本地记录与托盘提醒。飞书机器人是这个版本支持的远程渠道。0.3.1 候选源码新增 QQ 通知，可查看[QQ 接收设置](docs/QQ-NOTIFICATIONS.md)和[验证范围](VALIDATION.md)。
 
 ![CueScope 合成演示中，目标窗口出现“DEMO-0001 任务完成”，本机 OCR 读到这行原文并显示本地提醒](docs/media/cuescope-tasks.png)
 

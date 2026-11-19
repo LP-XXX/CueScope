@@ -406,6 +406,8 @@ class NotificationDispatcher:
     def _before_request(self, job: NotificationJob) -> None:
         if self._stop.is_set() or not self.delivery_enabled():
             raise _DeliveryStopped
+        if self.storage.cancel_if_unauthorized(job):
+            raise _DeliveryStopped
         if self.storage.suppress_during_quiet(job, time.time()):
             raise _DeliveryStopped
         if time.time() - job.created_at > self.ttl_seconds:
@@ -420,6 +422,8 @@ class NotificationDispatcher:
             self.limiter.acquire()
         self.metrics.rate_limit_wait((time.perf_counter() - waited_from) * 1000.0)
         if self._stop.is_set() or not self.delivery_enabled():
+            raise _DeliveryStopped
+        if self.storage.cancel_if_unauthorized(job):
             raise _DeliveryStopped
         if self.storage.suppress_during_quiet(job, time.time()):
             raise _DeliveryStopped
@@ -461,6 +465,8 @@ class NotificationDispatcher:
         if not jobs:
             return False
         job = jobs[0]
+        if self.storage.cancel_if_unauthorized(job):
+            return True
         # 排队等待：从事件写进 outbox（created_at）到分发线程真正开始处理它。
         # 只观察，不影响 due_jobs 的挑选与顺序。
         self.metrics.queue_wait(max(0.0, time.time() - job.created_at) * 1000.0)

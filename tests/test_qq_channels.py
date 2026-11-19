@@ -1,11 +1,19 @@
-from dataclasses import replace
+import time
+from dataclasses import asdict, replace
+from unittest.mock import patch
 
 import pytest
+from PySide6.QtCore import QEventLoop, QTimer
+from PySide6.QtNetwork import QHostAddress
+from PySide6.QtWebSockets import QWebSocketServer
+from PySide6.QtWidgets import QApplication
 
 from deal_watch import qq_notify
+from deal_watch.delivery_routes import DeliveryRoutes
 from deal_watch.notify import NotifyError, RelayDeliveryRejected, UnknownNotifyError
-from deal_watch.qq_notify import PushPlusClient, QQClient, QQTarget
-from deal_watch.ui.qq_binding import matching_recipient
+from deal_watch.qq_notify import PushPlusClient, QQClient, QQTarget, validate_settings
+from deal_watch.storage import Storage
+from deal_watch.ui.qq_binding import BindingThread, matching_recipient
 
 
 def test_only_matching_binding_event_reveals_recipient():
@@ -18,6 +26,62 @@ def test_only_matching_binding_event_reveals_recipient():
     private = {"op": 0, "t": "C2C_MESSAGE_CREATE",
                "d": {"author": {"user_openid": "test-user"}, "content": challenge}}
     assert matching_recipient(private, "user", challenge) == "test-user"
+
+
+def test_qq_gateway_handshake_and_single_use_binding_on_loopback():
+    import json
+
+    app = QApplication.instance() or QApplication([])
+    server = QWebSocketServer("synthetic-qq", QWebSocketServer.SslMode.NonSecureMode)
+    assert server.listen(QHostAddress.SpecialAddress.LocalHost, 0)
+    url = f"ws://127.0.0.1:{server.serverPort()}"
+
+    class LocalBinding(BindingThread):
+        def run(self):
+            self._listen(url, "QQBot sample")
+
+    peers = []
+    identified = []
+    def connected():
+        peer = server.nextPendingConnection()
+        peers.append(peer)
+
+        def respond(raw):
+            packet = json.loads(raw)
+            if packet["op"] == 2:
+                identified.append(packet["d"])
+                peer.sendTextMessage(json.dumps({"op": 0, "t": "READY", "s": 1, "d": {}}))
+        peer.textMessageReceived.connect(respond)
+        peer.sendTextMessage(json.dumps({"op": 10, "d": {"heartbeat_interval": 45000}}))
+
+    server.newConnection.connect(connected)
+    loop = QEventLoop()
+    worker = LocalBinding("sample", "unused", "user")
+    result = []
+
+    def simulate_pairing(challenge):
+        for message in ("unrelated sample", challenge):
+            peers[0].sendTextMessage(json.dumps({"op": 0, "t": "C2C_MESSAGE_CREATE",
+                "d": {"author": {"user_openid": "sample-user"}, "content": message}}))
+
+    worker.ready.connect(simulate_pairing)
+    worker.matched.connect(result.append)
+    worker.finished.connect(loop.quit)
+    timer = QTimer()
+    timer.setSingleShot(True)
+    timer.timeout.connect(loop.quit)
+    timer.start(5000)
+    worker.start()
+    try:
+        loop.exec()
+    finally:
+        worker.cancelled.set()
+        assert worker.wait(2500)
+        server.close()
+        timer.stop()
+        app.processEvents()
+    assert result == ["sample-user"]
+    assert identified[0]["token"] == "QQBot sample"
 
 
 def test_qq_direct_checks_each_network_request_and_reuses_token(monkeypatch):
@@ -42,7 +106,38 @@ def test_qq_direct_checks_each_network_request_and_reuses_token(monkeypatch):
     assert all("private" not in str(x) for x in calls)
     assert parts == [1, 1]
     assert replace(target, secret="rotated").id == target.id
+    assert replace(target, full_text=True).delivery_id != target.delivery_id
     assert replace(target, target="other").id != target.id
+
+
+def test_malformed_task_routes_cannot_fall_back_to_global_defaults():
+    with pytest.raises(ValueError):
+        validate_settings({"tasks": {"private-task": "all"}})
+
+
+def test_policy_changes_cancel_old_routes_without_disclosing_stored_text(tmp_path):
+    from deal_watch.models import MatchEvent
+
+    target = QQTarget("pushplus", "user", "个人", token="synthetic")
+    store = Storage(tmp_path / "events.db")
+    group = DeliveryRoutes(store, tmp_path, 300, None)
+    try:
+        with patch("deal_watch.delivery_routes.NotificationDispatcher.start"):
+            group.configure("auto", ("", ""), {"targets": [asdict(target)]})
+            first = group.routes("task")[0]
+            event = MatchEvent("task", "sample", "match", "private-example", "key", time.time())
+            store.record_match(event)
+            group.configure("auto", ("", ""), {"targets": [asdict(replace(target, full_text=True))]})
+            second = group.routes("task")[0]
+            deadline = time.monotonic() + 3
+            while not group.can_send(second) and time.monotonic() < deadline:
+                time.sleep(.01)
+            assert second != first and group.can_send(second) and not group.can_send(first)
+            assert store.list_deliveries(event.id)[0]["state"] == "revoked"
+            assert not store.for_destination(second).due_jobs()
+    finally:
+        group.stop()
+        store.close()
 
 
 def test_qq_requires_message_receipt_and_reports_user_refusal(monkeypatch):

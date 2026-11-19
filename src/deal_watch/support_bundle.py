@@ -17,7 +17,12 @@ _DELIVERY_STATES = frozenset({
 })
 _STAGES = frozenset({
     "capture", "worker_ready", "request", "decode", "ocr", "tracking", "record_write",
-    "hit_image_write", "rule_evaluation", "storage", "frame_validation",
+    "hit_image_write", "rule_evaluation", "storage", "frame_validation", "component_start",
+    "component_version", "diagnostics", "target_validation", "frame_callback_enter",
+    "startup_queue", "queue_wait", "ready", "deps_init_started", "deps_init",
+    "wgc_construct_started", "wgc_start_requested", "wgc_start", "first_valid_frame",
+    "session_stop", "session_exit", "wait_exit", "reader_start", "capture_resources",
+    "protocol", "transport",
 })
 
 

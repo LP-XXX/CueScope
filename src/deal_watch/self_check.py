@@ -68,6 +68,16 @@ def run_self_check(app, base_dir: Path, report_path: Path | None) -> int:
             if not any("4999" in block.text for block in observation.blocks):
                 raise RuntimeError("Synthetic OCR missing expected price")
             report["ocr_ms"] = round(observation.inference_ms, 2)
+            from .rule_config import RuleCondition, RuleGroup
+            from .ui.local_demo import LocalDemo
+
+            demo = LocalDemo(base_dir)
+            demo.rule = RuleGroup("Synthetic fixture", [RuleCondition("4999")])
+            demo.show_result([block.text for block in observation.blocks], "")
+            if not demo.alert.property("matched") or "4999" not in demo.output.text():
+                raise RuntimeError("Isolated demo did not display its OCR result and local notification")
+            report["local_demo_ocr_result"] = True
+            demo.close()
             from .ui.qq_binding import matching_recipient
 
             # Import the packaged Qt WebSockets extension and exercise pairing without a connection.

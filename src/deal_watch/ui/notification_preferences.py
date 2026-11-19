@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QTimeEdit,
 )
 
@@ -28,18 +29,22 @@ class NotificationTools(QObject):
         super().__init__(page)
         self.page = page
         self.host = host
+        self._thread = None
         self.quiet_button = QPushButton("设置免打扰时段和摘要")
         self.export_button = QPushButton("导出脱敏诊断包")
         notification_form.addRow("免打扰", self.quiet_button)
         storage_layout.addWidget(self.export_button)
         self.status = QLabel()
         self.status.setWordWrap(True)
+        self.status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         storage_layout.addWidget(self.status)
         self.quiet_button.clicked.connect(self.edit_quiet)
         self.export_button.clicked.connect(self.choose_export)
         self.completed.connect(self.finished)
 
     def background(self, work, success):
+        if getattr(self.host, "_shutdown_started", False) or self._thread and self._thread.is_alive():
+            return
         self.export_button.setEnabled(False)
         self.quiet_button.setEnabled(False)
         self.status.setText("正在处理…")
@@ -55,7 +60,13 @@ class NotificationTools(QObject):
             except RuntimeError:
                 pass  # The application was closed during the explicit export.
 
-        threading.Thread(target=run, name="notification-preferences", daemon=True).start()
+        self._thread = threading.Thread(target=run, name="notification-preferences", daemon=True)
+        self._thread.start()
+
+    def wait(self):
+        """Called from the shutdown worker before SQLite or Qt objects are closed."""
+        if self._thread:
+            self._thread.join()
 
     def finished(self, message: str):
         self.status.setText(message)

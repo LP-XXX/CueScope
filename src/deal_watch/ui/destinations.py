@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 from dataclasses import asdict
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Slot
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -134,27 +134,37 @@ class TargetEditor(QDialog):
         self.bind_button.setEnabled(False)
         self.status.setText("正在连接腾讯，绑定码有效期为两分钟。")
 
-        def display(code):
-            if self.isVisible() and self.signature() == signature:
-                where = "在目标群 @机器人并发送" if signature[1] == "group" else "私聊机器人并发送"
-                self.status.setText(f"{where}：{code}")
-
-        def matched(target):
-            if self.isVisible() and self.signature() == signature:
-                self._bound = target
-                self.status.setText("匹配到指定会话 · " + target[-6:] + "。确认无误后保存。")
-
-        thread.ready.connect(display)
-        thread.matched.connect(matched)
-        thread.failed.connect(self.status.setText)
+        thread.ready.connect(self._show_code)
+        thread.matched.connect(self._matched)
+        thread.failed.connect(self._binding_failed)
         thread.finished.connect(self._binding_done)
         start_binding(thread)
 
+    def _current_binding(self):
+        return (self.isVisible() and self._thread is not None and not self._thread.cancelled.is_set()
+                and self.signature() == self._signature)
+
+    @Slot(str)
+    def _show_code(self, code):
+        if self._current_binding():
+            where = "在目标群 @机器人并发送" if self._signature[1] == "group" else "私聊机器人并发送"
+            self.status.setText(f"{where}：{code}")
+
+    @Slot(str)
+    def _matched(self, target):
+        if self._current_binding():
+            self._bound = target
+            self.status.setText("匹配到指定会话 · " + target[-6:] + "。确认无误后保存。")
+
+    @Slot(str)
+    def _binding_failed(self, detail):
+        if self._current_binding():
+            self.status.setText(detail)
+
+    @Slot()
     def _binding_done(self):
         self.bind_button.setEnabled(True)
-        if self._thread:
-            self._thread.deleteLater()
-            self._thread = None
+        self._thread = None
 
     def done(self, result):
         if self._thread:

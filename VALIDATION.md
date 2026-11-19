@@ -15,4 +15,12 @@
 
 **如何查证。** 在 v0.3.0 便携包中打开 `validation/automated-tests.json`、`validation/package-smoke-0.3.0.json` 和 `validation/clean-environment-check-0.3.0.json`，可分别查看回归、冻结包和干净环境的摘要。源代码验证输出位于构建工作区的 `build/validation/`。旧版本的完整原始说明已保存在[固定版本的验证记录](https://github.com/LP-XXX/CueScope/blob/v0.3.0/VALIDATION.md)。
 
-**0.3.1 开发状态。** QQ 官方直连与第三方中转均需独立验证。判断新增通知渠道时应区分程序已排队、服务端受理、平台回执与用户在设备上看到消息。新增支持范围会随对应发行记录更新。
+## 0.3.1 候选源码与发行验收
+
+| 项目 | 已执行的离线检查 | 尚待现场确认 |
+| --- | --- | --- |
+| QQ 官方直连 | 本机模拟网关完成 Hello、鉴权、单次挑战绑定；模拟腾讯接口验证个人与群的路由、拒收、限流和消息回执 | 自有机器人的账号权限、目标群允许主动发言、手机 QQ 实际可见 |
+| PushPlus 中转 | 模拟提交、凭流水号查询、查询权限不足、超时和重启，核对同一流水不会再次提交；摘要策略与目的地在入队时绑定 | 指定账号、服务档位、真实转发及手机提醒 |
+| 本地使用 | 离屏合成演示经过实际 OCR；回归覆盖向导短语保存/取消、逐项判断、独立任务维护、记录检索、免打扰与计数摘要 | 首次使用者独立完成所需时间、已授权的真实桌面窗口组合 |
+
+公开 PR 的 Windows 离线检查提供 pytest 用例结果及 Ruff 结论。候选包对应的三份附件为 ZIP、SHA-256 和 `.validation.json`，其中的提交号、标签、实测计数和自检结果用于核对具体下载件。真实通知须由用户点击试发。[Windows 检查记录](https://github.com/LP-XXX/CueScope/actions/workflows/windows-ci.yml) · [发行记录](https://github.com/LP-XXX/CueScope/releases)

@@ -8,6 +8,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from zipfile import ZipFile
 
+import pytest
+
 from deal_watch.config import AppConfig
 from deal_watch.diagnostics import HitImageStore
 from deal_watch.models import MatchEvent
@@ -51,7 +53,7 @@ def test_one_event_per_distinct_match_and_independent_destinations():
         dupe = make_event("same-text")
         dupe.dedupe_key = "sample"
         assert not store.record_match(dupe, now=100)
-        targets[:] = ["c"]
+        targets.append("c")
         good, bad, redirected = Receiver(), Receiver(reject=True), Receiver()
         original_a, original_b = worker(store, "a", good), worker(store, "b", bad)
         assert not worker(store, "c", redirected).process_once()
@@ -130,6 +132,46 @@ def test_expire_retired_route_preserves_accepted_receipt():
         assert all(r["retry_exhausted"] for r in rows)
 
 
+def test_task_health_uses_task_routes_and_remains_system_event():
+    with closing(Storage(":memory:")) as store:
+        store.set_notification_routes(lambda source: () if source == "private-task" else ("global",))
+        event = make_event()
+        event.region_id = "system"
+        event.route_region_id = "private-task"
+        assert store.record_match(event, now=100)
+        assert not store.list_deliveries("sample")
+        assert store.list_events(event_kind="system")[0]["state"] == "local"
+
+
+def test_task_revocation_during_rate_wait_stops_attempt_and_is_durable():
+    allowed = {"task": ["a"]}
+    receiver = Receiver()
+    with closing(Storage(":memory:")) as store, patch("deal_watch.notify.time.time", return_value=100):
+        store.set_notification_routes(lambda source: allowed.get(source, ()))
+        store.record_match(make_event(), now=100)
+        scoped = store.for_destination("a")
+        class RemoveTask:
+            def acquire(self):
+                allowed["task"] = []
+        w = NotificationDispatcher(scoped, lambda: receiver, limiter=RemoveTask())
+        assert not w.process_once()
+        assert not receiver.calls
+        assert store.list_deliveries("sample")[0]["state"] == "revoked"
+        allowed["task"] = ["a"]
+        assert not w.process_once()
+
+
+def test_pending_retry_revoked_by_snapshot_stays_revoked_after_reenable():
+    with closing(Storage(":memory:")) as store:
+        store.set_notification_routes(lambda source: ("a",))
+        store.record_match(make_event(), now=100)
+        scoped = store.for_destination("a")
+        scoped.schedule_retry("sample", 60, "test", now=100)
+        store.revoke_unselected_deliveries(lambda source: ())
+        assert not scoped.due_jobs(now=200)
+        assert store.list_deliveries("sample")[0]["state"] == "revoked"
+
+
 def test_v4_database_backup_and_unbound_queue(tmp_path):
     path = tmp_path / "old.db"
     with closing(Storage(path)) as store:
@@ -160,12 +202,23 @@ def test_destination_identity_and_protected_store(tmp_path):
         vault.save({"token": "synthetic-value"})
         assert vault.load() == {"token": "synthetic-value"}
         assert b"synthetic-value" not in vault.path.read_bytes()
-        with patch("deal_watch.security.protect", side_effect=OSError):
-            try:
-                vault.save({"token": "other"})
-            except OSError:
-                pass
+        with patch("deal_watch.security.protect", side_effect=OSError), pytest.raises(OSError):
+            vault.save({"token": "other"})
         assert vault.load() == {"token": "synthetic-value"}
+
+
+def test_formerly_local_task_configuration_missing_is_not_a_new_install(tmp_path):
+    vault = DestinationCredentialStore(tmp_path)
+    assert vault.load() == {}
+    with patch("deal_watch.security.protect", side_effect=lambda value: value[::-1]), \
+         patch("deal_watch.security.unprotect", side_effect=lambda value: value[::-1]):
+        rules = {"targets": [], "tasks": {"private": [], "other": ["qq-receiver"]}}
+        vault.save(rules)
+        assert vault.load() == rules
+        vault.path.unlink()
+        with pytest.raises(OSError, match="缺失"):
+            vault.load()
+        assert vault.marker.read_bytes() == b"1\n"
 
 
 def test_cleanup_aged_images_even_when_capture_disabled(tmp_path):

@@ -204,6 +204,7 @@ class MatchEvent:
     duplicate_of: str = ""
     state: str = "pending"
     delivery_mode: str = "feishu"
+    route_region_id: str = ""
 
 
 @dataclass(slots=True)
@@ -218,6 +219,7 @@ class NotificationJob:
     updated_at: float = 0.0
     receipt: str = ""
     next_part: int = 0
+    route_region_id: str = ""
 
 
 @dataclass(slots=True)

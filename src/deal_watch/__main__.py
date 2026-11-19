@@ -150,7 +150,9 @@ def main() -> None:
     if not args.minimized:
         window.show()
     app.aboutToQuit.connect(window.exit_app)
-    sys.exit(app.exec())
+    result = app.exec()
+    window.finish_external_quit()
+    sys.exit(result)
 
 
 if __name__ == "__main__":

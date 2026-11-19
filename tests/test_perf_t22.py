@@ -569,7 +569,11 @@ class MainWindowRefreshTests(unittest.TestCase):
         """隐藏时也要能报出飞书异常——这正是 0.2.2 之前会漏掉的情形。"""
         self.window.hide()
         self.app.processEvents()
-        self.window.dispatcher._delivery_failed("模拟飞书不可达")
+        routes = self.window.dispatcher
+        with patch("deal_watch.delivery_routes.NotificationDispatcher.start"):
+            routes.configure("auto", ("http://127.0.0.1:18080/unused", ""), {})
+        _, worker = next(iter(routes._workers.values()))
+        worker._delivery_failed("模拟飞书不可达")
         messages: list[str] = []
         original = self.window.queue_system_message
         self.window.queue_system_message = lambda keyword, text, **kwargs: messages.append(keyword)
@@ -577,7 +581,6 @@ class MainWindowRefreshTests(unittest.TestCase):
             self.window.health_timer.timeout.emit()
         finally:
             self.window.queue_system_message = original
-            self.window.dispatcher.last_error = ""
         self.assertEqual(messages, ["通知连接异常"])
 
     def test_shutdown_stops_both_timers_and_joins_refresh_threads(self):

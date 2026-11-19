@@ -318,7 +318,7 @@ def verify_required_evidence() -> None:
     drifted: list[str] = []
     for relative, expected in snapshot.items():
         parts = relative.split("/")
-        if (any(part in {"", ".", ".."} for part in parts) or "\\" in relative
+        if (any(part in {"", ".", ".."} for part in parts) or "\\" in relative or ":" in relative
                 or PureWindowsPath(relative).drive or not isinstance(expected, str)
                 or not re.fullmatch(r"[0-9a-f]{64}", expected)):
             raise ValueError("源码指纹含无效路径或摘要")
@@ -392,9 +392,13 @@ def verify_frozen_payload() -> None:
             raise ValueError("Invalid build-time runtime manifest")
         if relative.split("/")[0] in runtime_dirs or relative == "CueScope.exe":
             expected[relative] = digest
-    actual = {f.relative_to(DIST).as_posix(): file_hash(f)
-              for folder in runtime_dirs for f in (DIST / folder).rglob("*") if f.is_file()}
-    actual["CueScope.exe"] = file_hash(DIST / "CueScope.exe")
+    actual = {}
+    files = [DIST / "CueScope.exe"]
+    files.extend(f for folder in runtime_dirs for f in (DIST / folder).rglob("*") if f.is_file())
+    for f in files:
+        if not f.resolve().is_relative_to(DIST.resolve()):
+            raise ValueError("Runtime file resolves outside the package")
+        actual[f.relative_to(DIST).as_posix()] = file_hash(f)
     if not expected or actual != expected:
         raise ValueError("Runtime contents changed after building")
 

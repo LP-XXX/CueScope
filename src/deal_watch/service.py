@@ -24,7 +24,14 @@ from .metrics import (
     STAGE_TRACKING_RULES,
     TimingRecorder,
 )
-from .models import CaptureErrorCode, FrameSample, HealthSnapshot, MatchEvent, RegionStatus
+from .models import (
+    CaptureErrorCode,
+    FrameSample,
+    HealthSnapshot,
+    MatchEvent,
+    RegionConfig,
+    RegionStatus,
+)
 from .ocr_cache import OcrCacheContext, ReusableOcr, ReuseStats
 from .readiness import readiness_detail, region_readiness_problems
 from .rules import RuleEngine

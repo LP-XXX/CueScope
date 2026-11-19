@@ -6,7 +6,7 @@ import argparse
 import ctypes
 import sys
 
-from deal_watch.demo_display import display1_work_area, place_hidden_window, window_device
+from deal_watch.demo_display import DISPLAY1, display1_work_area, place_hidden_window, window_device
 
 
 def main(argv=None) -> int:

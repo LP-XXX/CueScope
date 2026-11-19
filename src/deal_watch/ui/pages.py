@@ -412,6 +412,13 @@ def build_records_page(host) -> QWidget:
     host.activity_task.returnPressed.connect(apply_search)
     host.activity_text.returnPressed.connect(apply_search)
     search.addWidget(_button("筛选", apply_search))
+    def reset_search():
+        host.activity_task.clear()
+        host.activity_text.clear()
+        host.activity_time.setCurrentIndex(0)
+        apply_search()
+
+    search.addWidget(_button("清除", reset_search))
     layout.addLayout(search)
     host.records_tabs = QTabWidget()
     host.records_tabs.setObjectName("recordsTabs")

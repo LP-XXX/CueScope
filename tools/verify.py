@@ -37,7 +37,7 @@ def main(argv=None) -> int:
     commands = [
         [sys.executable, "-m", "pytest", "tests", "-vv", "-o", "faulthandler_timeout=45",
          f"--junitxml={OUTPUT / 'pytest.xml'}"],
-        [sys.executable, "-m", "ruff", "check", "src", "tests", "tools"],
+        [sys.executable, "-m", "ruff", "check", "--output-format", "concise", "src", "tests", "tools"],
     ]
     checks = []
     for command in commands:

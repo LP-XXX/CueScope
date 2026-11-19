@@ -88,6 +88,27 @@ class QQTarget:
         account = self.app_id if self.kind == "qq" else self.token
         return destination_id(self.kind, account, self.scope, self.target or "self")
 
+    @property
+    def delivery_id(self):
+        from .security import destination_id
+        # A queued summary must never be reformatted as full text after a settings edit.
+        return destination_id(self.kind, self.id, "text-v1" if self.full_text else "summary-v1")
+
+
+def validate_settings(settings):
+    if not isinstance(settings, dict):
+        raise ValueError("通知接收端配置无效")
+    targets, tasks = settings.get("targets", []), settings.get("tasks", {})
+    if not isinstance(targets, list) or not isinstance(tasks, dict):
+        raise ValueError("通知接收端或任务路由配置无效")
+    for item in targets:
+        target = QQTarget(**item)
+        if type(target.full_text) is not bool or type(target.enabled) is not bool:
+            raise ValueError("通知接收端开关无效")
+    for task, values in tasks.items():
+        if not isinstance(task, str) or not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+            raise ValueError("任务路由列表无效")
+
 
 def message_preview(payload, full_text):
     reference = str(payload.get("event_id", ""))[:12]

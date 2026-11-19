@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
 from .diagnostics import HitImageStore
@@ -24,33 +25,75 @@ class DeliveryRoutes:
         self._retiring = {}
         self._labels = {}
         self._overrides = {}
+        self._route_keys = {}
         self._stopping = False
         self._maintenance = None
         self._next_cleanup = 0
         self._event_owners = {}
+        self._update_generation = 0
+        self._verified_generation = -1
+        self._verifier = ThreadPoolExecutor(max_workers=1, thread_name_prefix="route-permissions")
+        self.configuration_error = ""
         self.storage.set_notification_routes(self.routes)
 
-    def configure(self, mode, feishu, settings):
+    def suspend(self):
+        self._update_generation += 1
+
+    def configure(self, mode, feishu, settings, *, unavailable=False):
+        if self._stopping:
+            return
+        self.suspend()
+        generation = self._update_generation
         targets = [QQTarget(**item) for item in settings.get("targets", [])]
         active = {}
-        if feishu[0] and mode != "local":
+        all_keys = {}
+        if feishu[0]:
             key = destination_id("feishu", feishu[0])
-            active[key] = tuple(feishu)
+            all_keys[key] = key
+            if mode != "local":
+                active[key] = tuple(feishu)
             self._labels[key] = "飞书"
         for target in targets:
-            self._labels[target.id] = target.alias
+            self._labels[target.delivery_id] = target.alias
+            all_keys[target.id] = target.delivery_id
             if mode == "auto" and target.enabled:
-                active[target.id] = target
-        self._overrides = {key: tuple(values) for key, values in settings.get("tasks", {}).items()}
+                active[target.delivery_id] = target
+        overrides = {key: tuple(values) for key, values in settings.get("tasks", {}).items()}
+        self._overrides = overrides
+        self._route_keys = all_keys
         self._active = active
+        if unavailable:
+            self.configuration_error = "通知配置无法读取，外发已暂停。请检查 Windows 用户或恢复备份。"
+            return
+
+        def allowed(region):
+            return tuple(all_keys[key] for key in overrides.get(region, all_keys) if key in all_keys)
+
+        def check_permissions():
+            try:
+                self.storage.revoke_unselected_deliveries(allowed)
+            except Exception:
+                if generation == self._update_generation:
+                    self.configuration_error = "投递授权未能写入，外发已暂停。请检查磁盘并重试保存。"
+                return
+            if generation == self._update_generation:
+                self.configuration_error = ""
+                self._verified_generation = generation
+
+        self._verifier.submit(check_permissions)
         self.reconcile()
 
     def routes(self, region_id="system"):
         active = self._active
-        return tuple(key for key in self._overrides.get(region_id, active) if key in active)
+        keys = self._route_keys
+        return tuple(keys[key] for key in self._overrides.get(region_id, keys) if key in keys and keys[key] in active)
 
     def label(self, key):
         return self._labels.get(key, "历史接收端 " + key[:12])
+
+    def can_send(self, key):
+        return (not self._stopping and key in self._active
+                and self._verified_generation == self._update_generation)
 
     def reconcile(self):
         if self._stopping:
@@ -73,7 +116,7 @@ class DeliveryRoutes:
             worker = NotificationDispatcher(
                 self.storage.for_destination(key), lambda item=client: item, ttl_seconds=self.ttl,
                 metrics=self.metrics,
-                delivery_enabled=lambda k=key, d=definition: not self._stopping and self._active.get(k) == d,
+                delivery_enabled=lambda k=key, d=definition: self.can_send(k) and self._active.get(k) == d,
             )
             self._workers[key] = (definition, worker)
             worker.start()
@@ -125,3 +168,4 @@ class DeliveryRoutes:
             worker.stop()
         if self._maintenance:
             self._maintenance.join(timeout=2)
+        self._verifier.shutdown(wait=True)
