@@ -54,10 +54,15 @@ def main() -> None:
     from deal_watch.brand import DISPLAY_NAME, TAGLINE
     parser = argparse.ArgumentParser(description=f"{DISPLAY_NAME} · {TAGLINE}")
     parser.add_argument("--minimized", action="store_true", help="启动后仅显示托盘")
+    parser.add_argument("--local-demo", action="store_true", help="生成示例、离线识别并显示本地提醒")
     parser.add_argument("--self-check", action="store_true", help="隔离离线自检，不读取用户配置或发送通知")
     parser.add_argument("--report", type=Path, help="自检 JSON 报告路径")
     args = parser.parse_args()
     enable_dpi_awareness()
+    if args.local_demo:
+        from deal_watch.ui.local_demo import run_demo
+
+        raise SystemExit(run_demo(application_base_dir()))
     if args.self_check:
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
     from PySide6.QtCore import QObject, Signal
@@ -145,7 +150,9 @@ def main() -> None:
     if not args.minimized:
         window.show()
     app.aboutToQuit.connect(window.exit_app)
-    sys.exit(app.exec())
+    result = app.exec()
+    window.finish_external_quit()
+    sys.exit(result)
 
 
 if __name__ == "__main__":

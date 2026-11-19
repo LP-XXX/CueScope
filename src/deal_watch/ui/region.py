@@ -5,8 +5,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import Counter
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import numpy as np
 from PySide6.QtCore import QPoint, QRect, Qt, QThread, Signal
@@ -567,6 +568,7 @@ class SelectionCaptureWorker(QThread):
         super().__init__(parent)
         self.hwnd = hwnd
         self.backend = backend
+        self.client = None
 
     def run(self) -> None:
         try:
@@ -575,10 +577,31 @@ class SelectionCaptureWorker(QThread):
                 raise RuntimeError("所选窗口已关闭，请重新选择。")
             if current.minimized:
                 raise RuntimeError("窗口已最小化，请先恢复。")
-            frame = WindowCaptureClient().capture(self.hwnd, self.backend)
+            client = self.client or WindowCaptureClient()
+            frame = client.capture(self.hwnd, self.backend)
             self.completed.emit(current, frame.image, frame.width, frame.height, "")
         except Exception as error:
             self.completed.emit(None, None, 0, 0, f"{type(error).__name__}: {error}")
+
+
+def preview_unit_lines(messages, rules):
+    lines = []
+    for number, message in enumerate(messages, 1):
+        reason = "未选择规则"
+        if rules:
+            result = rules.explain(message)
+            if result.excluded_by:
+                reason = "排除条件 · " + "、".join(result.excluded_by)
+            elif result.should_notify:
+                reason = "命中 · " + "、".join(result.matched_labels)
+            elif getattr(result, "error", ""):
+                reason = result.error
+            elif message.boundary_uncertain:
+                reason = "文字边界不确定"
+            else:
+                reason = "未满足所选规则"
+        lines.append(f"{number}. {message.text}\n    {reason}")
+    return "\n".join(lines)
 
 
 class PreviewImageLabel(QLabel):
@@ -671,8 +694,7 @@ class RegionEditDialog(QDialog):
         self.window_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.window_combo.setMinimumContentsLength(20)
         self.window_combo.setMinimumWidth(0)
-        for window in self.windows:
-            self.window_combo.addItem(window.title, window)
+        self._populate_window_combo()
         form.addRow("区域名称", self.alias)
         window_row = QHBoxLayout()
         window_row.addWidget(self.window_combo, 1)
@@ -737,7 +759,14 @@ class RegionEditDialog(QDialog):
         self.preview_image = PreviewImageLabel()
         preview_layout.addWidget(self.preview_image, 1)
         self.preview_result = self._label("确认圈选内容可读后保存。")
-        preview_layout.addWidget(self.preview_result)
+        self.preview_result.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        detail_scroll = QScrollArea()
+        detail_scroll.setWidgetResizable(True)
+        detail_scroll.setWidget(self.preview_result)
+        detail_scroll.setAccessibleName("逐条识别文字和判断理由")
+        detail_scroll.setMinimumHeight(72)
+        detail_scroll.setMaximumHeight(150)
+        preview_layout.addWidget(detail_scroll)
         self.steps.addWidget(preview_page)
 
         footer = QHBoxLayout()
@@ -876,13 +905,21 @@ class RegionEditDialog(QDialog):
         self.capture_status.setText("选择窗口后重新截取。")
         self._show_step(0)
 
+    def _populate_window_combo(self):
+        titles = Counter(window.title for window in self.windows)
+        for window in self.windows:
+            title = window.title
+            if titles[title] > 1:
+                process = PureWindowsPath(window.process_path).name or "进程未知"
+                title = f"{title} · {process} · 窗口 {window.hwnd:X}"
+            self.window_combo.addItem(title, window)
+
     def refresh_windows(self):
         previous = getattr(self.window_combo.currentData(), "hwnd", None)
         self.windows = WindowsWindows().list_windows()
         self.window_combo.blockSignals(True)
         self.window_combo.clear()
-        for window in self.windows:
-            self.window_combo.addItem(window.title, window)
+        self._populate_window_combo()
         for index, window in enumerate(self.windows):
             if window.hwnd == previous:
                 self.window_combo.setCurrentIndex(index)
@@ -908,7 +945,7 @@ class RegionEditDialog(QDialog):
         window = self.window_combo.currentData()
         backend = str(self.backend_combo.currentData())
         if window is None or window.minimized:
-            self.capture_status.setText("请先打开或恢复所选聊天窗口。")
+            self.capture_status.setText("请先打开或恢复所选窗口。")
             return
         if self._capture_running():
             return
@@ -929,6 +966,7 @@ class RegionEditDialog(QDialog):
         logger.info("区域截取开始 generation=%s hwnd=%s backend=%s title_fp=%s",
                     generation, hwnd, backend, title_fingerprint(window.title))
         worker = SelectionCaptureWorker(hwnd, backend, self)
+        worker.client = getattr(self, "capture_client", None)
         self._selection_worker = worker
         self._selection_worker_generation = generation
         worker.completed.connect(lambda current, image, width, height, error:
@@ -1027,7 +1065,8 @@ class RegionEditDialog(QDialog):
         draft = self._build_region()
         if self.rules is not None:
             groups = getattr(getattr(self.parent(), "config", None), "rule_groups", [])
-            self.rules.configure_regions([draft], groups)
+            quick_rule = self.task_options.draft_rule()
+            self.rules.configure_regions([draft], [*groups, quick_rule] if quick_rule else groups)
         rect = self.selected_rect
         image = self._frame_image[rect.y:rect.y + rect.height, rect.x:rect.x + rect.width].copy()
         frame = FrameSample(draft.id, 1, time.time(), image, rect)
@@ -1070,14 +1109,10 @@ class RegionEditDialog(QDialog):
                 hits = [m for m in messages if self.rules and self.rules.decide(m).matched_keywords]
                 self._preview_verified = True
                 self._preview_evidence = (generation, selection_generation, evidence)
-                self.capture_status.setText("请确认文字区域清晰、完整。")
-                details = []
-                if self.rules:
-                    for message in messages[:3]:
-                        result = self.rules.explain(message)
-                        label = "命中" if result.should_notify else "被排除" if result.excluded_by else "未命中"
-                        details.append(label + ("：" + "、".join(result.matched_labels or result.excluded_by) if result.matched_labels or result.excluded_by else ""))
-                self.preview_result.setText(f"{len(messages)} 个内容单位 · 命中 {len(hits)} 条 · 预览不发送提醒\n" + "；".join(details))
+                self.capture_status.setText("选区可以保存。当前没有提醒条件；请返回第一步填写短语，或稍后配置规则。"
+                                           if self.task_options.reminder_missing() else "请确认文字区域清晰、完整。")
+                self.preview_result.setText(f"{len(messages)} 个内容单位 · 命中 {len(hits)} 条 · 预览不发送提醒\n"
+                                            + preview_unit_lines(messages, self.rules))
         if image is not None and observation is not None:
             image = image.copy()
             painter = QPainter(image)
@@ -1085,6 +1120,8 @@ class RegionEditDialog(QDialog):
             for block in observation.blocks:
                 box = block.box
                 painter.drawRect(box.x, box.y, box.width, box.height)
+            for number, message in enumerate(blocks_to_messages(observation), 1):
+                painter.drawText(message.box.x, max(12, message.box.y), str(number))
             painter.setPen(QPen(QColor("#C74E39"), 2, Qt.PenStyle.DashLine))
             for box in observation.uncovered_boxes:
                 painter.drawRect(box.x, box.y, box.width, box.height)
@@ -1373,11 +1410,8 @@ class PreviewDialog(QDialog):
             self.status.setText(
                 "未识别到任何文字块，不能确认此区域。请调整圈选范围后重试。"
             )
-        self.result_label.setText(
-            "命中：\n" + "\n---\n".join(message.text for message in hits)
-            if hits else "当前可见内容未命中关键词。"
-        )
-        self.results_scroll.setFixedHeight(104 if hits else 32)
+        self.result_label.setText(preview_unit_lines(self.messages, self.rules) or "当前没有可读文字。")
+        self.results_scroll.setFixedHeight(104 if self.messages else 32)
         pixmap = QPixmap.fromImage(image)
         if observation.uncovered_boxes:
             painter = QPainter(pixmap)

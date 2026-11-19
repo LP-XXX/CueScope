@@ -84,7 +84,8 @@ def test_new_capture_incident_after_user_stop_or_disable_is_not_deduplicated(tmp
         _pending_after_stop=None,
     )
 
-    def persist(keyword, text, *, event_id):
+    def persist(keyword, text, *, event_id, route_region_id):
+        assert route_region_id == "r"
         return storage.record_match(MatchEvent(
             "system", keyword, keyword, text, event_id, 1.0,
             id=event_id, delivery_mode="local",

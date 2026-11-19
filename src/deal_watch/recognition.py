@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import MessageCandidate, new_id
+from .record_search import RecordSearch
 
 _RECORD_FIELDS = (
     "id", "region_id", "region_alias", "observed_at", "text", "kind",
@@ -32,7 +33,8 @@ CREATE TABLE IF NOT EXISTS records (
     char_matches TEXT NOT NULL,
     created_at REAL NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_records_created ON records(created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_records_by_time ON records(created_at);
+DROP INDEX IF EXISTS idx_records_created;
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
@@ -106,14 +108,18 @@ class RecognitionStore:
                             boundary_uncertain, matched_keywords, decision,
                             char_matches, created_at
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        [tuple(row[key] for key in _RECORD_FIELDS) for row in rows],
+                        [tuple(row[key] for key in _RECORD_FIELDS) for row in reversed(rows)],
                     )
                     self._trim_locked()
                 actual = self._conn.execute(
-                    "SELECT * FROM records ORDER BY created_at DESC, id DESC LIMIT ?",
+                    "SELECT * FROM records ORDER BY created_at DESC, rowid DESC LIMIT ?",
                     (self.limit,),
                 ).fetchall()
-                if len(actual) != len(rows) or self._summary(actual) != self._summary(rows):
+                # Historical selection uses the legacy id tie-break. Compare the
+                # retained contents independently of rowids assigned by older runs.
+                actual_digest = self._summary(sorted(actual, key=lambda row: row["id"]))
+                source_digest = self._summary(sorted(rows, key=lambda row: row["id"]))
+                if len(actual) != len(rows) or actual_digest != source_digest:
                     raise RuntimeError("旧识别记录迁移校验失败，原数据库已保留")
                 with self._conn:
                     self._conn.execute(
@@ -200,7 +206,7 @@ class RecognitionStore:
     def _trim_locked(self) -> None:
         self._conn.execute(
             """DELETE FROM records WHERE id IN (
-                SELECT id FROM records ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?
+                SELECT id FROM records ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?
             )""",
             (self.limit,),
         )
@@ -245,19 +251,23 @@ class RecognitionStore:
             self._bump_revision_locked()
         return ids
 
-    def list_records(self, limit: int = 200, offset: int = 0) -> list[dict[str, Any]]:
+    def list_records(self, limit: int = 200, offset: int = 0, *, search: RecordSearch | None = None) -> list[dict[str, Any]]:
         if limit < 0 or offset < 0:
             raise ValueError("limit 和 offset 不能为负数")
+        clauses, values = search.conditions() if search else ([], [])
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM records ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
-                (limit, offset),
+                f"SELECT * FROM records {where} ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
+                (*values, limit, offset),
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def count(self) -> int:
+    def count(self, *, search: RecordSearch | None = None) -> int:
+        clauses, values = search.conditions() if search else ([], [])
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
         with self._lock:
-            return int(self._conn.execute("SELECT COUNT(*) FROM records").fetchone()[0])
+            return int(self._conn.execute(f"SELECT COUNT(*) FROM records {where}", values).fetchone()[0])
 
     def set_limit(self, limit: int) -> None:
         self._validate_limit(limit)

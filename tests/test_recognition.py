@@ -4,6 +4,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest import mock
 
@@ -19,6 +20,18 @@ def message(text: str, tracking_id: str) -> MessageCandidate:
 
 
 class RecognitionStoreTests(unittest.TestCase):
+    def test_same_storage_clock_retains_insertion_order_across_batches_and_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            with closing(RecognitionStore(path, limit=2)) as store:
+                with mock.patch("deal_watch.recognition.time.time", return_value=100), \
+                     mock.patch("deal_watch.recognition.new_id", side_effect=["z", "y", "a"]):
+                    store.record_candidates("r", "synthetic", 10, [message("first", "1"), message("second", "2")], {})
+                    store.record_candidates("r", "synthetic", 10, [message("third", "3")], {})
+            with closing(RecognitionStore(path, limit=2)) as store:
+                self.assertEqual([row["text"] for row in store.list_records(1)], ["third"])
+                self.assertEqual([row["text"] for row in store.list_records(1, 1)], ["second"])
+
     @staticmethod
     def _create_legacy(path: Path, *, count: int = 1, wal: bool = False) -> sqlite3.Connection:
         connection = sqlite3.connect(path)

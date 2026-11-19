@@ -49,7 +49,7 @@ def host(tmp_path, app):
     return SimpleNamespace(
         config=SimpleNamespace(keywords=["手机", "优惠券"], rule_groups=[], regions=[]),
         save_rule_groups=Mock(), _change_event_filter=Mock(),
-        save_keywords=Mock(), save_settings=Mock(), send_test=Mock(), export_records=Mock(),
+        save_keywords=Mock(), save_settings=Mock(), edit_destinations=Mock(), send_test=Mock(), export_records=Mock(),
         show_record_detail=Mock(), _change_recognition_page=Mock(), _begin_recognition_prepare=Mock(),
         refresh_records=Mock(), refresh_recognition=Mock(),
         data_dir=tmp_path, config_store=SimpleNamespace(path=tmp_path / "config.json"),

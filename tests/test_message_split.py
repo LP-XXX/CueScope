@@ -30,7 +30,7 @@ try:  # Pillow 只在合成用例里使用，缺失时整组跳过。
 except Exception:  # pragma: no cover - 环境缺 Pillow
     _PIL_AVAILABLE = False
 
-_FONT_PATH = Path("C:/Windows/Fonts/msyh.ttc")
+_FONT_PATH = Path(__file__).parent / "fixtures/fonts/CueScopeFixtureSans.otf"
 _READY = _PIL_AVAILABLE and _FONT_PATH.is_file()
 
 PAGE = (237, 237, 237)
@@ -169,7 +169,7 @@ class Layout:
         return block
 
 
-@unittest.skipUnless(_READY, "缺少 Pillow 或微软雅黑字体，跳过合成版面用例")
+@unittest.skipUnless(_READY, "缺少 Pillow 或合成测试字体，跳过合成版面用例")
 class MessageSplitTests(unittest.TestCase):
     """验收场景 1-9：分割、合并、图片/卡片排除。"""
 
@@ -434,7 +434,7 @@ class MessageSplitTests(unittest.TestCase):
         self.assertTrue(rules.decide(messages[0]).should_notify)
 
 
-@unittest.skipUnless(_READY, "缺少 Pillow 或微软雅黑字体，跳过合成版面用例")
+@unittest.skipUnless(_READY, "缺少 Pillow 或合成测试字体，跳过合成版面用例")
 class BoundaryDecisionTests(unittest.TestCase):
     """场景 9 的纯函数面：不确定面板不参与组装、面板矩形进未覆盖。"""
 
@@ -463,7 +463,7 @@ class BoundaryDecisionTests(unittest.TestCase):
         self.assertFalse(any(rules.decide(item).should_notify for item in candidates))
 
 
-@unittest.skipUnless(_READY, "缺少 Pillow 或微软雅黑字体，跳过合成版面用例")
+@unittest.skipUnless(_READY, "缺少 Pillow 或合成测试字体，跳过合成版面用例")
 class FrameBorderTests(unittest.TestCase):
     """P3-2：帧四周的均匀边框宽度必须动态清除（写死 3px 会漏掉 11px 边框）。"""
 
@@ -506,7 +506,7 @@ class FrameBorderTests(unittest.TestCase):
         self.assertEqual(panels[0].rect, panel)
 
 
-@unittest.skipUnless(_READY, "缺少 Pillow 或微软雅黑字体，跳过合成版面用例")
+@unittest.skipUnless(_READY, "缺少 Pillow 或合成测试字体，跳过合成版面用例")
 class SinglePanelTests(unittest.TestCase):
     """A0：帧内只有一个面板时也要能判“一条长消息”还是“两段粘连”。"""
 
@@ -561,7 +561,7 @@ class SinglePanelTests(unittest.TestCase):
         self.assertTrue(len(messages) <= 2)
 
 
-@unittest.skipUnless(_READY, "缺少 Pillow 或微软雅黑字体，跳过合成版面用例")
+@unittest.skipUnless(_READY, "缺少 Pillow 或合成测试字体，跳过合成版面用例")
 class CardStructureTests(unittest.TestCase):
     """0.2.1 卡片漏检修复：小尺寸缩略图种子 + 浅色卡片结构证据。"""
 
@@ -700,7 +700,7 @@ class CardStructureTests(unittest.TestCase):
         self.assertTrue(rules.decide(messages[0]).should_notify)
 
 
-@unittest.skipUnless(_READY, "缺少 Pillow 或微软雅黑字体，跳过合成版面用例")
+@unittest.skipUnless(_READY, "缺少 Pillow 或合成测试字体，跳过合成版面用例")
 class BorderlessLightCardTests(unittest.TestCase):
     """白底无边框商品卡片：卡片底色只比页面亮 3 级，卡内文字必须整卡排除。
 

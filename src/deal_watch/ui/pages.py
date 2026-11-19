@@ -394,6 +394,32 @@ def build_legacy_keywords_page(host) -> QWidget:
 
 def build_records_page(host) -> QWidget:
     page, layout, _header = _page("活动记录")
+    search = QHBoxLayout()
+    host.activity_task = QLineEdit()
+    host.activity_task.setPlaceholderText("任务名称")
+    host.activity_text = QLineEdit()
+    host.activity_text.setPlaceholderText("搜索识别文字")
+    host.activity_time = QComboBox()
+    for label, hours in (("全部时间", 0), ("最近 1 小时", 1), ("最近 24 小时", 24), ("最近 7 天", 168)):
+        host.activity_time.addItem(label, hours)
+    for control, name in ((host.activity_task, "按任务名称筛选"), (host.activity_text, "按正文筛选"),
+                          (host.activity_time, "按识别时间筛选")):
+        control.setAccessibleName(name)
+        search.addWidget(control)
+    def apply_search():
+        host.set_activity_search(host.activity_task.text(), host.activity_text.text(), host.activity_time.currentData())
+
+    host.activity_task.returnPressed.connect(apply_search)
+    host.activity_text.returnPressed.connect(apply_search)
+    search.addWidget(_button("筛选", apply_search))
+    def reset_search():
+        host.activity_task.clear()
+        host.activity_text.clear()
+        host.activity_time.setCurrentIndex(0)
+        apply_search()
+
+    search.addWidget(_button("清除", reset_search))
+    layout.addLayout(search)
     host.records_tabs = QTabWidget()
     host.records_tabs.setObjectName("recordsTabs")
     notifications = QWidget()
@@ -516,9 +542,10 @@ def build_settings_page(host) -> QWidget:
     body.setContentsMargins(0, 0, 4, 0)
     body.setSpacing(16)
     notification, form = _section(body, "通知")
+    notification_form = form
     host.notification_mode = QComboBox()
     host.notification_mode.setAccessibleName("通知方式")
-    for label, key in (("自动：已配置飞书则发送，否则本地记录", "auto"), ("仅本地记录与提示", "local"), ("飞书机器人", "feishu")):
+    for label, key in (("发送到已启用的接收端", "auto"), ("仅本地记录与提示", "local"), ("仅飞书机器人", "feishu")):
         host.notification_mode.addItem(label, key)
     host.notification_mode.setMinimumWidth(0)
     host.notification_mode.setMinimumContentsLength(12)
@@ -534,6 +561,11 @@ def build_settings_page(host) -> QWidget:
     host.secret_edit.setPlaceholderText("选填")
     form.addRow("飞书 Webhook", host.webhook_edit)
     form.addRow("签名密钥", host.secret_edit)
+    host.manage_destinations = _button("配置 QQ 与任务接收端", host.edit_destinations)
+    form.addRow("QQ 提醒", host.manage_destinations)
+    host.test_target = QComboBox()
+    host.test_target.setAccessibleName("试发接收端")
+    form.addRow("试发接收端", host.test_target)
     host.test_button = _button("发送测试消息", host.send_test)
     host.test_button.setToolTip("仅点击此按钮才发送测试通知。")
     row = QHBoxLayout()
@@ -549,6 +581,8 @@ def build_settings_page(host) -> QWidget:
     monitor.addWidget(_label("任务可单独设置间隔；实际延迟在任务详情查看。"))
     storage, form = _section(body, "存储")
     host.record_limit = QSpinBox()
+    from .notification_preferences import NotificationTools
+    host.notification_tools = NotificationTools(host, page, notification_form, storage)
     host.record_limit.setRange(1, 2147483647)
     host.record_limit.setSingleStep(1000)
     host.record_limit.setGroupSeparatorShown(True)

@@ -13,6 +13,8 @@ from PySide6.QtWidgets import (
 )
 
 from ..content import CONTENT_MODES
+from ..models import new_id
+from ..rule_config import RuleCondition, RuleGroup
 
 
 class TaskOptions(QWidget):
@@ -27,9 +29,17 @@ class TaskOptions(QWidget):
         for key, label in CONTENT_MODES.items():
             self.mode.addItem(label, key)
         self.rules = QComboBox()
-        self.rules.addItem("兼容关键词（旧任务）", "")
+        self._has_keywords = bool(getattr(config, "keywords", []))
+        self.rules.addItem("兼容关键词（旧任务）" if self._has_keywords or existing else "暂不设规则，先保存选区", "")
+        self._active_groups = {g.id for g in getattr(config, "rule_groups", []) if g.enabled}
+        self._known_config = config is not None
         for group in getattr(config, "rule_groups", []):
             self.rules.addItem(group.name, group.id)
+        self.quick_phrase = QLineEdit()
+        self.quick_phrase.setAccessibleName("直接输入提醒短语")
+        self.quick_phrase.setPlaceholderText("例如：任务完成；留空则使用规则组")
+        self.quick_phrase.setMaxLength(160)
+        self._group_id, self._condition_id = new_id(), new_id()
         self.title_policy = QComboBox()
         self.title_policy.addItem("固定标题，变化后确认", "strict")
         self.title_policy.addItem("跟随此窗口当前内容", "window")
@@ -44,7 +54,7 @@ class TaskOptions(QWidget):
         self.group = QLineEdit()
         self.group.setPlaceholderText("内容相同的来源使用同一个组名")
         self.group.setMaxLength(128)
-        for title, widget in (("内容模式", self.mode), ("规则组", self.rules), ("窗口跟随", self.title_policy),
+        for title, widget in (("内容模式", self.mode), ("提醒短语", self.quick_phrase), ("规则组", self.rules), ("窗口跟随", self.title_policy),
                               ("采样间隔", self.interval), ("去重范围", self.dedupe), ("去重组", self.group)):
             widget.setAccessibleName(title)
             widget.setMinimumWidth(0)
@@ -72,9 +82,11 @@ class TaskOptions(QWidget):
             widget.currentIndexChanged.connect(self._changed)
         self.interval.valueChanged.connect(self._changed)
         self.group.textChanged.connect(self._changed)
+        self.quick_phrase.textChanged.connect(self._changed)
         self._refresh()
 
     def _refresh(self):
+        self.rules.setEnabled(not self.quick_phrase.text().strip())
         self.group.setEnabled(self.dedupe.currentData() == "group")
         text = {
             "generic_line": "每个文字行独立判断；不会跨行拼出关键词。",
@@ -83,6 +95,8 @@ class TaskOptions(QWidget):
         }[self.mode.currentData()]
         if self.title_policy.currentData() == "window":
             text += " 切换页面后也会监测此窗口新显示的内容。"
+        if self.reminder_missing():
+            text += " 当前还没有有效提醒条件；填写上方短语或选择已启用的规则组。"
         self.hint.setText(text)
 
     def _changed(self, *_):
@@ -95,6 +109,20 @@ class TaskOptions(QWidget):
             raise ValueError("任务采样间隔须为 10–300 秒，或使用默认值")
         if self.dedupe.currentData() == "group" and not self.group.text().strip():
             raise ValueError("请填写去重组名称")
-        return dict(content_mode=self.mode.currentData(), rule_group_id=self.rules.currentData(),
+        group_id = self._group_id if self.quick_phrase.text().strip() else self.rules.currentData()
+        return dict(content_mode=self.mode.currentData(), rule_group_id=group_id,
                     title_policy=self.title_policy.currentData(), poll_interval_ms=seconds * 1000,
                     dedupe_scope=self.dedupe.currentData(), dedupe_group=self.group.text().strip())
+
+    def draft_rule(self):
+        text = self.quick_phrase.text().strip()
+        if not text:
+            return None
+        return RuleGroup(name=text, id=self._group_id,
+                         conditions=[RuleCondition(text, id=self._condition_id)])
+
+    def reminder_missing(self):
+        if not self._known_config or self.quick_phrase.text().strip():
+            return False
+        selected = self.rules.currentData()
+        return selected not in self._active_groups if selected else not self._has_keywords

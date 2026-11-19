@@ -272,7 +272,7 @@ class RuleEngine:
                 event, cooldown_seconds=self.cooldown_seconds, now=time.time() if now is None else now
             )
             decision.event_id = event.id
-            decision.queue_state = "queued" if should_send else "duplicate"
+            decision.queue_state = ("queued" if event.state == "pending" else event.state) if should_send else "duplicate"
             self._notified[message.tracking_id] = meaningful
             self._notified.move_to_end(message.tracking_id)
             while len(self._notified) > _MAX_REMEMBERED_NOTIFIED:

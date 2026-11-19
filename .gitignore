@@ -23,6 +23,10 @@ models/*.download
 credentials.dpapi
 config.json
 hits/
+/CueScope-*-win-x64.zip
+/CueScope-*-win-x64.zip.sha256
+*.dpapi
+*.db.before-destinations-*.bak
 # 真实聊天截图、标注原图和通知记录不得入库
 *.private.png
 replay-private/

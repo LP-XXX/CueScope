@@ -258,6 +258,12 @@ class RuleWorkspace(QWidget):
         self._refresh_groups(current)
         self.status_label.setText("" if self._drafts else "尚无规则组。点击“新建组”开始。")
 
+    def add_committed_group(self, group):
+        raw = group.to_dict()
+        self._committed.append(copy.deepcopy(raw))
+        self._drafts.append(raw)
+        self._refresh_groups(self._current_group_id or group.id)
+
     def set_busy(self, busy, message=""):
         self._busy = bool(busy)
         self.editor.setEnabled(not self._busy)

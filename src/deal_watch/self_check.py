@@ -56,8 +56,9 @@ def run_self_check(app, base_dir: Path, report_path: Path | None) -> int:
 
             image = Image.new("RGB", (650, 300), (250, 250, 250))
             draw = ImageDraw.Draw(image)
-            font = ImageFont.truetype(str(Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts/msyh.ttc"), 26)
-            draw.text((30, 50), "合成自检 手机 4999 元", font=font, fill="black")
+            # Pillow supplies this scalable font even on Windows without CJK fonts.
+            font = ImageFont.load_default(size=32)
+            draw.text((30, 50), "CueScope 4999", font=font, fill="black")
             frame = FrameSample(
                 "self-check", 1, time.time(), np.asarray(image)[:, :, ::-1].copy(),
                 Rect(0, 0, 650, 300),
@@ -67,6 +68,24 @@ def run_self_check(app, base_dir: Path, report_path: Path | None) -> int:
             if not any("4999" in block.text for block in observation.blocks):
                 raise RuntimeError("Synthetic OCR missing expected price")
             report["ocr_ms"] = round(observation.inference_ms, 2)
+            from .rule_config import RuleCondition, RuleGroup
+            from .ui.local_demo import LocalDemo
+
+            demo = LocalDemo(base_dir)
+            demo.rule = RuleGroup("Synthetic fixture", [RuleCondition("4999")])
+            demo.show_result([block.text for block in observation.blocks], "")
+            if not demo.alert.property("matched") or "4999" not in demo.output.text():
+                raise RuntimeError("Isolated demo did not display its OCR result and local notification")
+            report["local_demo_ocr_result"] = True
+            demo.close()
+            from .ui.qq_binding import matching_recipient
+
+            # Import the packaged Qt WebSockets extension and exercise pairing without a connection.
+            packet = {"op": 0, "t": "C2C_MESSAGE_CREATE",
+                      "d": {"content": "fixture", "author": {"user_openid": "synthetic_self"}}}
+            if matching_recipient(packet, "private", "fixture") != "synthetic_self":
+                raise RuntimeError("QQ pairing module failed offline check")
+            report["qq_pairing_module"] = True
             window = MainWindow(base_dir)
             window.show()
             if window.pages.count() != 4 or window.records_tabs.count() != 2:

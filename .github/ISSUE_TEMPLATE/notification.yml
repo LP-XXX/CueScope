@@ -1,0 +1,42 @@
+name: 通知与投递问题
+description: 区分未命中、仅本地、排队、服务端回执与手机显示
+title: "[通知] "
+body:
+  - type: markdown
+    attributes:
+      value: "请只提交合成内容。如涉及泄露凭据、采集非目标窗口或误投给其他人，请使用[私密报告](https://github.com/LP-XXX/CueScope/security/advisories/new)。"
+  - type: input
+    id: version
+    attributes:
+      label: CueScope 版本与来源
+      placeholder: "例如 v0.3.0，GitHub 便携包"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Windows 版本与使用场景
+      placeholder: "例如 Windows 11 x64，通用逐行，使用本地记录"
+    validations:
+      required: true
+  - type: textarea
+    id: destination
+    attributes:
+      label: 选择的通知方式及接收端
+      description: "例如本地托盘、飞书群、QQ 官方或第三方；只写渠道类别。请省略机器人地址、群号、QQ 号和凭据。"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 用合成文字怎样复现
+      placeholder: "例如新建文档，输入“示例 01 等待中”……"
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: 期望、实际结果和错误阶段
+      description: "投递问题请分别写出活动记录状态和你在收件端看到的结果。请勿粘贴原始日志或收件地址。"
+    validations:
+      required: true

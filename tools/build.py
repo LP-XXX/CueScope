@@ -80,7 +80,7 @@ def verify_capture_component() -> dict:
         raise RuntimeError(
             f"采集组件自检未返回有效 JSON：{result.stdout[-400:]}{result.stderr[-400:]}"
         ) from error
-    if not payload.get("ok"):
+    if result.returncode or not payload.get("ok"):
         raise RuntimeError(
             "采集组件依赖自检失败（便携包将无法圈选）："
             f"{payload.get('error')}\n{payload.get('error_detail', '')}"
@@ -94,7 +94,7 @@ def verify_capture_component() -> dict:
         "kind": "capture_component_self_test",
         "version": VERSION,
         "finished_at": time.time(),
-        "component": str(component.relative_to(ROOT)).replace("\\", "/"),
+        "component": "capture-component/DealWatchCapture.exe",
         "component_sha256": hashlib.sha256(component.read_bytes()).hexdigest(),
         "numpy_bundles": bundles,
         "payload": payload,
@@ -110,12 +110,14 @@ def write_capture_self_test(report: dict) -> Path:
 
 
 def main(argv: list[str] | None = None) -> None:
+    global DIST_ROOT, VALIDATION_DIR
     parser = argparse.ArgumentParser(description="构建当前版本便携目录")
     # 默认仍写 dist/；候选构建必须显式指定独立目录，避免覆盖已交付的 0.2.0/0.2.1/0.2.2。
     parser.add_argument("--dist-root", default=str(ROOT / "dist"))
     parser.add_argument("--work-root", default=str(ROOT / "build" / "pyinstaller"))
+    parser.add_argument("--evidence-dir", type=Path, default=VALIDATION_DIR)
     args = parser.parse_args(argv)
-    global DIST_ROOT
+    VALIDATION_DIR = args.evidence_dir.resolve()
     dist_root = Path(args.dist_root).resolve()
     DIST_ROOT = dist_root
     dist_root.mkdir(parents=True, exist_ok=True)
@@ -171,7 +173,9 @@ def main(argv: list[str] | None = None) -> None:
     from checksums import write_manifest
 
     # 清单必须是 LF：Windows 默认写成 CRLF 时，sha256sum -c 会把 \r 当成文件名的一部分。
-    print(f"Checksums: {write_manifest(dist)}")
+    manifest = write_manifest(dist)
+    shutil.copy2(manifest, VALIDATION_DIR / f"frozen-payload-{VERSION}.sha256")
+    print(f"Checksums: {manifest}")
     print(f"Portable directory: {dist}")
 
 

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 私下报告安全或隐私问题
+    url: https://github.com/LP-XXX/CueScope/security/advisories/new
+    about: 涉及凭据、用户数据或错误收件人时请联系维护者。
