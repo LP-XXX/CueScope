@@ -403,6 +403,8 @@ class MonitorService:
             self._generation.setdefault(region_id, 0)
             self._runtime.setdefault(region_id, _Runtime())
             self._regions[region_id] = region
+            if region_id not in self._region_order:
+                self._region_order.append(region_id)
             self._invalidate_locked(region_id, retry_now=True)
             runtime = self._runtime[region_id]
             runtime.status = RegionStatus.BASELINING
@@ -410,6 +412,15 @@ class MonitorService:
             runtime.failed = False
         self._emit_health(region_id)
         return True
+
+    def apply_saved_region(self, region: RegionConfig) -> None:
+        """Apply one persisted task edit to the running scheduler; keep unrelated baselines."""
+        if not region.enabled:
+            self.pause_region(region.id)
+            return
+        with self._condition:
+            self.rules.configure_regions(self.config.regions, self.config.rule_groups)
+        self.resume_region(region.id)
 
     def update_keywords(self, keywords: list[str]) -> None:
         with self._condition:
@@ -907,7 +918,8 @@ class MonitorService:
                         or runtime.failed
                     ):
                         continue
-                    if self._tracker_generation.get(region_id) != generation:
+                    baselining = self._tracker_generation.get(region_id) != generation
+                    if baselining:
                         self.tracker.reset(region_id)
                         self._tracker_generation[region_id] = generation
                     # 复用轮的 inference_ms 是 0.0，**不能**盖掉上一次真实推理的耗时：
@@ -939,6 +951,10 @@ class MonitorService:
                     events = self.rules.process(
                         messages, region.alias, decisions=decisions
                     )
+                    changed_ids = {message.tracking_id for message in messages}
+                    for tracking_id, decision in decisions.items():
+                        if decision.should_notify and tracking_id not in changed_ids:
+                            decision.queue_state = "baseline" if baselining else "unchanged"
                     storage_ms += (time.perf_counter() - storage_started) * 1000.0
                 # 埋点在条件锁**外**写：临界区只留状态变更，避免采集线程等锁时
                 # 连带等 metrics 的锁（两把锁固定按 condition → metrics 单向获取，

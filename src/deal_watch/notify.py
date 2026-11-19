@@ -122,6 +122,10 @@ class _DeliveryStopped(Exception):
     pass
 
 
+class RelayDeliveryRejected(NotifyError):
+    """A receipt query explicitly reports that downstream delivery failed."""
+
+
 def _request_outcome(error: NotifyError) -> str:
     """把异常映射成单次请求的结果名（只用于观测，不参与重试判定）。"""
     if error.unknown:
@@ -181,6 +185,10 @@ def build_messages(payload: dict[str, Any], timestamp: int, secret: str) -> list
 
 
 class FeishuClient:
+    @staticmethod
+    def part_count(payload: dict[str, Any]) -> int:
+        return len(_chunks(str(payload.get("text", ""))))
+
     def __init__(
         self,
         webhook: str,
@@ -398,6 +406,8 @@ class NotificationDispatcher:
     def _before_request(self, job: NotificationJob) -> None:
         if self._stop.is_set() or not self.delivery_enabled():
             raise _DeliveryStopped
+        if self.storage.suppress_during_quiet(job, time.time()):
+            raise _DeliveryStopped
         if time.time() - job.created_at > self.ttl_seconds:
             raise _DeliveryExpired
         # 限速等待单独计时：它与采集/网络无关，是"通知排队慢"与"飞书慢"的分界。
@@ -410,6 +420,8 @@ class NotificationDispatcher:
             self.limiter.acquire()
         self.metrics.rate_limit_wait((time.perf_counter() - waited_from) * 1000.0)
         if self._stop.is_set() or not self.delivery_enabled():
+            raise _DeliveryStopped
+        if self.storage.suppress_during_quiet(job, time.time()):
             raise _DeliveryStopped
         if time.time() - job.created_at > self.ttl_seconds:
             raise _DeliveryExpired
@@ -444,6 +456,7 @@ class NotificationDispatcher:
             # No outbound request may outrun the durable incident history.
             self.last_error = "通知健康记录尚未保存，请检查本地存储"
             return False
+        self.storage.flush_destination_digest(time.time(), self.ttl_seconds)
         jobs = self.storage.due_jobs(limit=1)
         if not jobs:
             return False
@@ -451,11 +464,31 @@ class NotificationDispatcher:
         # 排队等待：从事件写进 outbox（created_at）到分发线程真正开始处理它。
         # 只观察，不影响 due_jobs 的挑选与顺序。
         self.metrics.queue_wait(max(0.0, time.time() - job.created_at) * 1000.0)
-        if self.storage.next_part(job.event_id) >= len(_chunks(str(job.payload.get("text", "")))):
-            self.storage.mark_sent(job.event_id)
+        if job.state == "submitting" and not job.receipt:
+            self.storage.mark_unknown_terminal(job.event_id, "中转提交后缺少回执，未重复提交")
+            return True
+        # Fetch the client for this immutable destination. Formatting and chunk
+        # count are provider-specific, including recovery after the final ack.
+        try:
+            client = self.client_factory()
+        except Exception:
+            if time.time() - job.created_at <= self.ttl_seconds:
+                self.storage.schedule_retry(job.event_id, 5, "通知接收端暂不可用", job.state)
+            elif job.receipt:
+                self.storage.finish_forwarded(job.event_id, "中转已受理，查询已过期")
+            else:
+                self.storage.mark_expired(job.event_id)
+            return True
+        count_parts = getattr(client, "part_count", None)
+        # Legacy injected clients implement a single send(payload) call.
+        if job.next_part and job.next_part >= (count_parts(job.payload) if count_parts else 1):
+            if getattr(client, "success_state", "sent") == "forwarded":
+                self.storage.finish_forwarded(job.event_id, "中转已受理，最终送达尚未确认")
+            else:
+                self.storage.mark_sent(job.event_id)
             self.metrics.result(OUTCOME_SENT)
             return True
-        if job.attempts >= self.max_attempts:
+        if not job.receipt and job.attempts >= self.max_attempts:
             error = "达到自动发送次数上限，投递结果需人工核对"
             if not self._is_health_job(job):
                 self._delivery_failed(error)
@@ -465,23 +498,61 @@ class NotificationDispatcher:
             return True
         now = time.time()
         if now - job.created_at > self.ttl_seconds:
-            self.storage.mark_expired(job.event_id, now)
+            if job.receipt:
+                self.storage.finish_forwarded(job.event_id, "查询已过期，中转已受理，最终送达尚未确认")
+            else:
+                self.storage.mark_expired(job.event_id, now)
             self.metrics.result(OUTCOME_EXPIRED)
             return True
         attempt_started = False
+        tracked_send = getattr(client, "send_tracked", None)
+        receipt = job.receipt
 
         def before_request() -> None:
             nonlocal attempt_started
             self._before_request(job)
             if not attempt_started:
-                self.storage.mark_attempt(job.event_id)
+                if not receipt:
+                    if tracked_send:
+                        self.storage.mark_submitting(job.event_id)
+                    self.storage.mark_attempt(job.event_id)
                 attempt_started = True
 
+        def on_receipt(value: str) -> None:
+            nonlocal receipt
+            self.storage.save_receipt(job.event_id, value)
+            receipt = value
+
+        def tracked_error(error: NotifyError) -> None:
+            if receipt and isinstance(error, RelayDeliveryRejected):
+                self.storage.mark_failed(job.event_id, "服务商报告下游投递失败")
+                if not self._is_health_job(job):
+                    self._delivery_failed("服务商报告下游投递失败")
+            elif receipt and error.retryable:
+                self.storage.schedule_retry(job.event_id, 5, "中转已受理，等待查询最终结果", "forwarded")
+            elif receipt:
+                self.storage.finish_forwarded(job.event_id, "中转已受理，无法查询最终送达")
+            elif attempt_started and error.unknown:
+                self.storage.mark_unknown_terminal(job.event_id, "中转提交结果未知，未重复提交")
+                if not self._is_health_job(job):
+                    self._delivery_failed("中转提交结果未知")
+            else:
+                self._record_error(job, error)
+
         try:
-            client = self.client_factory()
-            if isinstance(client, FeishuClient):
+            if tracked_send:
+                result = tracked_send(job.payload, now=now, before_request=before_request,
+                                      receipt=receipt, on_receipt=on_receipt)
+                if not attempt_started or result not in ("sent", "forwarded"):
+                    raise UnknownNotifyError("中转返回未确认的结果")
+                if result == "forwarded":
+                    if not receipt:
+                        raise UnknownNotifyError("中转未提供流水号")
+                    self.storage.schedule_retry(job.event_id, 5, "", "forwarded")
+                    return True
+            elif count_parts:
                 # 观测器只补空缺：调用方自己配了 metrics 时尊重它，不覆盖。
-                if client.metrics is None:
+                if isinstance(client, FeishuClient) and client.metrics is None:
                     client.metrics = self.metrics
                 client.send(
                     job.payload,
@@ -490,6 +561,8 @@ class NotificationDispatcher:
                     before_request=before_request,
                     on_part_sent=lambda part: self.storage.mark_part_sent(job.event_id, part),
                 )
+                if not attempt_started or self.storage.next_part(job.event_id) != count_parts(job.payload):
+                    raise UnknownNotifyError("通知分片缺少业务回执")
             else:
                 # 兼容离线模拟接收器和原有注入接口。
                 before_request()
@@ -510,13 +583,26 @@ class NotificationDispatcher:
             self.metrics.result(OUTCOME_STOPPED)
             return False
         except _DeliveryExpired:
-            self.storage.mark_expired(job.event_id)
+            if receipt:
+                self.storage.finish_forwarded(job.event_id, "中转已受理，查询已过期")
+            else:
+                self.storage.mark_expired(job.event_id)
             self.metrics.result(OUTCOME_EXPIRED)
         except NotifyError as error:
-            self._record_error(job, error)
+            if tracked_send:
+                tracked_error(error)
+            else:
+                self._record_error(job, error)
         except Exception:
-            self._record_error(job, UnknownNotifyError("发送处理异常，投递结果未知"))
+            error = UnknownNotifyError("发送处理异常，投递结果未知")
+            if tracked_send:
+                tracked_error(error)
+            else:
+                self._record_error(job, error)
         else:
+            if getattr(client, "success_state", "sent") == "forwarded" and not tracked_send:
+                self.storage.finish_forwarded(job.event_id, "中转已受理，最终送达尚未确认")
+                return True
             self.storage.mark_sent(job.event_id)
             if attempt_started and not self._is_health_job(job):
                 self._health.succeeded(job.event_id)

@@ -44,7 +44,7 @@ try:  # Pillow 只用于合成帧；缺失时相关用例整体跳过。
 except Exception:  # pragma: no cover - 环境缺 Pillow
     _PIL_AVAILABLE = False
 
-_FONT_PATH = Path("C:/Windows/Fonts/msyh.ttc")
+_FONT_PATH = Path(__file__).parent / "fixtures/fonts/CueScopeFixtureSans.otf"
 _READY = _PIL_AVAILABLE and _FONT_PATH.is_file()
 
 PAGE = (245, 245, 245)
@@ -170,7 +170,7 @@ class StorageCase(unittest.TestCase):
         self.temp.cleanup()
 
 
-@unittest.skipUnless(_READY, "缺少 Pillow 或微软雅黑字体，跳过合成帧用例")
+@unittest.skipUnless(_READY, "缺少 Pillow 或合成测试字体，跳过合成帧用例")
 class BubbleSplitAdversarialTests(StorageCase):
     """对抗性气泡分割：描边帧、空行分段、0px 粘连、4px 间隔。"""
 

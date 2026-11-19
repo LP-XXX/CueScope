@@ -27,8 +27,6 @@ if any(Path(name).name != name or "/" in name or "\\" in name for name in model_
 datas = [(str(ROOT / "models" / name), "models") for name in (*model_files, "manifest.json")] + [
     (str(ROOT / "src/deal_watch/assets/brand"), "deal_watch/assets/brand"),
     (str(ROOT / "LICENSE"), "."),
-    (str(ROOT / "README.md"), "."),
-    (str(ROOT / "VALIDATION.md"), "."),
     (str(ROOT / "requirements.lock"), "."),
     (str(ROOT / "THIRD_PARTY_NOTICES.md"), "."),
 ] + rapid_datas + ort_datas

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import MessageCandidate, new_id
+from .record_search import RecordSearch
 
 _RECORD_FIELDS = (
     "id", "region_id", "region_alias", "observed_at", "text", "kind",
@@ -245,19 +246,23 @@ class RecognitionStore:
             self._bump_revision_locked()
         return ids
 
-    def list_records(self, limit: int = 200, offset: int = 0) -> list[dict[str, Any]]:
+    def list_records(self, limit: int = 200, offset: int = 0, *, search: RecordSearch | None = None) -> list[dict[str, Any]]:
         if limit < 0 or offset < 0:
             raise ValueError("limit 和 offset 不能为负数")
+        clauses, values = search.conditions() if search else ([], [])
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM records ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
-                (limit, offset),
+                f"SELECT * FROM records {where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+                (*values, limit, offset),
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def count(self) -> int:
+    def count(self, *, search: RecordSearch | None = None) -> int:
+        clauses, values = search.conditions() if search else ([], [])
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
         with self._lock:
-            return int(self._conn.execute("SELECT COUNT(*) FROM records").fetchone()[0])
+            return int(self._conn.execute(f"SELECT COUNT(*) FROM records {where}", values).fetchone()[0])
 
     def set_limit(self, limit: int) -> None:
         self._validate_limit(limit)

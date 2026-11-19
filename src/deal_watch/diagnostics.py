@@ -480,14 +480,18 @@ class HitImageStore:
         if not self.directory.exists():
             return
         now = time.time()
-        files = sorted(
-            (item for item in self.directory.glob("*.png") if item.is_file()),
-            key=lambda item: item.stat().st_mtime,
-            reverse=True,
-        )
+        files = []
+        for item in self.directory.glob("*.png"):
+            try:
+                if item.is_file() and not item.is_symlink():
+                    stat = item.stat()
+                    files.append((stat.st_mtime, stat.st_size, item))
+            except FileNotFoundError:
+                continue  # A concurrent save/cleanup may finish first.
+        files.sort(reverse=True)
         total = 0
-        for item in files:
-            stat = item.stat()
-            total += stat.st_size
-            if now - stat.st_mtime > max_age_seconds or total > max_bytes:
+        for modified, size, item in files:
+            if now - modified > max_age_seconds or total + size > max_bytes:
                 item.unlink(missing_ok=True)
+            else:
+                total += size

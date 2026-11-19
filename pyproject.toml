@@ -4,10 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cuescope"
-version = "0.3.0"
+version = "0.3.1"
 description = "Windows 本地窗口文字监测与提醒"
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.11,<3.12"
 license = {text = "MIT"}
 dependencies = [
   "mss==10.1.0",
@@ -15,6 +15,7 @@ dependencies = [
   "PySide6==6.8.3",
   "rapidocr==3.10.0",
   "onnxruntime==1.20.1",
+  "requests==2.34.2",
 ]
 
 [project.optional-dependencies]

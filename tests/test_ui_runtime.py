@@ -200,7 +200,7 @@ class UiRuntimeTests(unittest.TestCase):
         self.assertEqual(decision_label("unsupported_message_type"), "非普通文字，跳过")
         # 未知状态保持原值，不隐藏新代码。
         self.assertEqual(decision_label("model_degraded_char_rule"), "model_degraded_char_rule")
-        self.assertEqual(delivery_label("sent"), "飞书已接受")
+        self.assertEqual(delivery_label("sent"), "平台已接受")
         self.assertEqual(delivery_label("pending"), "等待发送")
         self.assertEqual(delivery_label("not_a_state"), "not_a_state")
         self.window.refresh_recognition()

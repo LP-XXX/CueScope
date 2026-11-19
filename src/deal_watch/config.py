@@ -109,7 +109,7 @@ class AppConfig:
     regions: list[RegionConfig] = field(default_factory=list)
     keywords: list[str] = field(default_factory=list)
     webhook: str = ""
-    save_hit_images: bool = True
+    save_hit_images: bool = False
     auto_start: bool = False
     poll_interval_ms: int = 30000
     recognition_record_limit: int = 20000
@@ -186,6 +186,7 @@ class ConfigStore:
                 region.capture_backend = "wgc"
         raw["model"] = ModelConfig(**raw.get("model", {}))
         raw["rule_groups"] = [RuleGroup.from_dict(item) for item in raw.get("rule_groups", [])]
+        raw.setdefault("save_hit_images", True)  # Older files used opt-out capture.
         config = AppConfig(**raw)
         # Webhook 只从 DPAPI 凭据存储恢复；旧配置中的明文凭据必须移除。
         config.webhook = ""

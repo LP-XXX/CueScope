@@ -43,7 +43,7 @@ def package(tmp_path, monkeypatch):
     build = tmp_path / "build-interpreter"
     main_numpy = distribution(build, "numpy", "2.2.6", ["numpy-2.2.6.dist-info/LICENSE.txt"])
     installed = {"numpy": main_numpy}
-    for name in ("mss", "PySide6", "rapidocr", "onnxruntime", "pillow"):
+    for name in ("mss", "PySide6", "rapidocr", "onnxruntime", "pillow", "requests"):
         installed[name] = distribution(build, name, "1.0", [f"{name}-1.0.dist-info/LICENSE.txt"])
     monkeypatch.setattr(module.importlib.metadata, "distribution", installed.__getitem__)
 

@@ -1,6 +1,6 @@
-name: 功能故障
-description: 本地运行、配置、监测或投递与预期不一致
-title: "[故障] "
+name: 通知与投递问题
+description: 区分未命中、仅本地、排队、服务端回执与手机显示
+title: "[通知] "
 body:
   - type: markdown
     attributes:
@@ -17,6 +17,13 @@ body:
     attributes:
       label: Windows 版本与使用场景
       placeholder: "例如 Windows 11 x64，通用逐行，使用本地记录"
+    validations:
+      required: true
+  - type: textarea
+    id: destination
+    attributes:
+      label: 选择的通知方式及接收端
+      description: "例如本地托盘、飞书群、QQ 官方或第三方；只写渠道类别。请省略机器人地址、群号、QQ 号和凭据。"
     validations:
       required: true
   - type: textarea

@@ -47,3 +47,11 @@ def test_source_drift_still_blocks_release(release):
     (module.ROOT / 'source.py').write_bytes(b'x = 2\n')
     with pytest.raises(ValueError, match='指纹'):
         module.verify_required_evidence()
+
+
+@pytest.mark.parametrize("path", ["../outside.txt", "C:/outside.txt", "folder\\outside.txt"])
+def test_source_fingerprints_must_stay_in_checkout(release, path):
+    module, reports = release
+    (reports / "source-snapshot.json").write_text(json.dumps({path: "0" * 64}), encoding="utf-8")
+    with pytest.raises(ValueError, match="无效路径"):
+        module.verify_required_evidence()

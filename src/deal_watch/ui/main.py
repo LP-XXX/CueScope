@@ -39,6 +39,7 @@ from .. import __version__
 from ..brand import DISPLAY_NAME, brand_icon
 from ..config import ConfigStore, default_data_dir, validate_webhook_url
 from ..content import CONTENT_MODES
+from ..delivery_routes import DeliveryRoutes
 from ..diagnostics import close_logging, configure_logging, title_fingerprint
 from ..health import IncidentTracker
 from ..health_queue import HealthEventWriter
@@ -52,10 +53,12 @@ from ..models import (
     RegionStatus,
 )
 from ..normalize import content_digest
-from ..notify import FeishuClient, NotificationDispatcher, NotifyMetrics
+from ..notify import FeishuClient, NotifyError, NotifyMetrics
 from ..ocr import LocalOcr
+from ..qq_notify import PushPlusClient, QQClient, QQTarget
 from ..readiness import readiness_summary, region_readiness_problems
 from ..recognition import RecognitionStore
+from ..record_search import RecordSearch
 from ..region_save import (
     ACTION_LABELS,
     RegionSaveResult,
@@ -64,12 +67,13 @@ from ..region_save import (
     commit_region_change,
 )
 from ..rules import RuleEngine
-from ..security import CredentialStore
+from ..security import CredentialStore, DestinationCredentialStore, destination_id
 from ..service import MonitorService
 from ..storage import Storage
 from ..window_capture import WindowFrameCapturer
 from .icons import icon
 from .pages import RecordDetailDialog, build_keywords_page, build_records_page, build_settings_page
+from .qq_binding import stop_bindings, wait_bindings
 from .region import (
     PreviewDialog,
     RegionEditDialog,
@@ -88,6 +92,11 @@ DECISION_LABELS: dict[str, str] = {
     "rule_configuration_error": "规则配置无效",
     "rule_input_too_large": "文本超出规则预算",
     "queued": "判断应通知·已入队",
+    "baseline": "启动或恢复基线",
+    "unchanged": "文字未变化",
+    "local": "命中·已本地记录",
+    "muted": "免打扰·已本地记录",
+    "digest_counted": "免打扰·已计入摘要",
     "duplicate": "判断应通知·重复合并",
     "already_processed": "同一消息已处理",
     "boundary_uncertain": "边界不确定，未判断",
@@ -98,7 +107,12 @@ DECISION_LABELS: dict[str, str] = {
 DELIVERY_LABELS: dict[str, str] = {
     "local": "已本地记录",
     "pending": "等待发送",
-    "sent": "飞书已接受",
+    "sent": "平台已接受",
+    "partial": "各接收端状态不同",
+    "forwarded": "中转已受理·等待最终确认",
+    "submitting": "正在提交",
+    "muted": "免打扰·已抑制",
+    "digest_counted": "免打扰·已计入摘要",
     "failed": "发送失败",
     "unknown": "结果未知",
     "expired": "过期未补发",
@@ -279,6 +293,7 @@ def wrapped_label(text: str, *, object_name: str = "") -> QLabel:
 
 
 class Bridge(QObject):
+    local_digest = Signal(int)
     events = Signal(object)
     health = Signal(object)
     test_result = Signal(str)
@@ -539,12 +554,24 @@ class MainWindow(QMainWindow):
             self.logger.exception("Failed to load DPAPI credentials")
             self.webhook, self.secret = "", ""
         self._credential_snapshot = (self.webhook, self.secret)
+        self.destination_store = DestinationCredentialStore(self.data_dir)
+        self.destination_settings = {}
+        self._destinations_load_error = False
+        try:
+            loaded = self.destination_store.load()
+            for item in loaded.get("targets", []):
+                QQTarget(**item)
+            self.destination_settings = loaded
+        except Exception:
+            self._destinations_load_error = True
+            self.logger.warning("Unable to read notification destinations")
         self.storage = Storage(self.data_dir / "deal-watch.db")
         self.storage.cleanup()
         self.health_writer = HealthEventWriter(self.storage, self.config.dedupe_seconds, logger=self.logger)
         self.capture_incidents = IncidentTracker()
         self._announced_health_ids = []
         self._record_kind = "all"
+        self._activity_search = None
         self._event_view_revision = 0
         self.recognition = RecognitionStore(self.data_dir, self.config.recognition_record_limit)
         self._recognition_ready = False
@@ -559,6 +586,8 @@ class MainWindow(QMainWindow):
         # 互不相干的计数器。只在进程内累积，环形容量固定，不会随时间增长。
         self.metrics = TimingRecorder()
         self.bridge = Bridge()
+        self._digest_thread = None
+        self.bridge.local_digest.connect(self._show_local_digest)
         self.bridge.events.connect(self.on_events)
         self.bridge.health.connect(self.on_health)
         self.bridge.test_result.connect(self.on_test_result)
@@ -581,14 +610,9 @@ class MainWindow(QMainWindow):
         self._failed_save_message = ""
         self._pending_after_stop: Callable[[], None] | None = None
         self.service: MonitorService | None = None
-        self.dispatcher = NotificationDispatcher(
-            self.storage,
-            lambda: FeishuClient(*self._credential_snapshot),
-            ttl_seconds=self.config.event_ttl_seconds,
-            metrics=NotifyMetrics(self.metrics),
-            delivery_enabled=lambda: bool(self._credential_snapshot[0]) and self.config.notification_mode != "local",
-        )
-        self.dispatcher.start()
+        self.dispatcher = DeliveryRoutes(self.storage, self.data_dir, self.config.event_ttl_seconds,
+                                         NotifyMetrics(self.metrics))
+        self.dispatcher.configure(self.config.notification_mode, self._credential_snapshot, self.destination_settings)
         self.quitting = False
         self._shutdown_done = False
         self._shutdown_started = False
@@ -623,7 +647,7 @@ class MainWindow(QMainWindow):
         # 判断要不要重查，且各自最多一个在途查询（互不阻塞）。``revision_source``
         # 让协调器在结果回主线程前判断“这批数据是否已被更新的写入超越”。
         self.records_refresh = RecordsRefreshCoordinator(
-            lambda: self.storage.list_events(RECORDS_LIMIT, event_kind=self._record_kind),
+            lambda: self.storage.list_events(RECORDS_LIMIT, event_kind=self._record_kind, **self.activity_search_args()),
             self,
             name="records-refresh",
             revision_source=self._events_revision,
@@ -694,8 +718,9 @@ class MainWindow(QMainWindow):
 
     def _fetch_recognition_page(self) -> list[dict]:
         page = self._recognition_page
-        total = self.recognition.count()
-        rows = self.recognition.list_records(RECOGNITION_PAGE_SIZE, page * RECOGNITION_PAGE_SIZE)
+        args = self.activity_search_args()
+        total = self.recognition.count(**args)
+        rows = self.recognition.list_records(RECOGNITION_PAGE_SIZE, page * RECOGNITION_PAGE_SIZE, **args)
         self._recognition_total = total
         return rows
 
@@ -751,6 +776,9 @@ class MainWindow(QMainWindow):
         self.region_summary.setWordWrap(True)
         title_block.addWidget(self.region_summary)
         heading.addLayout(title_block, 1)
+        self.demo_button = QPushButton("体验本地提醒")
+        self.demo_button.clicked.connect(self.open_local_demo)
+        heading.addWidget(self.demo_button)
         self.add_region_button = QPushButton("新建任务")
         self.add_region_button.setIcon(icon("add"))
         self.add_region_button.setToolTip("添加监控区域；运行期间请先暂停监控")
@@ -772,7 +800,7 @@ class MainWindow(QMainWindow):
         self.region_table.action_requested.connect(self._region_row_action)
         self.region_table.itemDoubleClicked.connect(lambda item: self.show_region_detail())
         layout.addWidget(self.region_table, 1)
-        self.empty_regions = QLabel("为没有接口的软件添加文字提醒。\n先创建规则组，再选择窗口和关注区域。")
+        self.empty_regions = QLabel("选择窗口、输入提醒短语，再圈选文字区域。\n也可以先体验一条本地示例提醒。")
         self.empty_regions.setObjectName("pageSubtitle")
         self.empty_regions.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty_regions.setWordWrap(True)
@@ -791,6 +819,21 @@ class MainWindow(QMainWindow):
         layout.addLayout(footer)
         return page
 
+    def open_local_demo(self):
+        from PySide6.QtCore import QProcess
+
+        if not hasattr(self, "_demo_process"):
+            self._demo_process = QProcess(self)
+            self._demo_process.setProgram(sys.executable)
+            args = [] if getattr(sys, "frozen", False) else ["-m", "deal_watch"]
+            self._demo_process.setArguments([*args, "--local-demo"])
+            self._demo_process.finished.connect(
+                lambda code, _status: self.statusBar().showMessage("演示已关闭" if code == 0 else "演示启动失败，请检查 Windows 屏幕 1 和本地模型。"))
+            self._demo_process.errorOccurred.connect(
+                lambda _error: self.statusBar().showMessage("演示进程未能启动，请检查程序文件。"))
+        if self._demo_process.state() == QProcess.ProcessState.NotRunning:
+            self._demo_process.start()
+
     def _region_row_action(self, action: str, region_id: str) -> None:
         if self._select_region_row(region_id) is None:
             return
@@ -807,10 +850,9 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         remove = menu.addAction("删除区域", self.delete_region)
         pause.setEnabled(not self._saving and not self._shutdown_started)
-        for item in (calibrate, remove):
-            item.setEnabled(not self._saving and not self._shutdown_started
-                            and self.service is None and self._stopping_service is None)
-            item.setToolTip("请先暂停监控" if self.service is not None else "")
+        available = not self._saving and not self._settings_busy and not self._shutdown_started and self._stopping_service is None
+        calibrate.setEnabled(available and (not self.service or bool(self._live_task_service())))
+        remove.setEnabled(available and self.service is None)
         menu.setToolTipsVisible(True)
         try:
             menu.exec(QCursor.pos())
@@ -1029,7 +1071,13 @@ class MainWindow(QMainWindow):
         self._clear_failed_save()
         self._pending_save = (action, region, index)
         self._set_saving(True)
-        started = self.save_coordinator.request_save(self.config, action, region, index)
+        draft = getattr(self, "_draft_task_rule", None)
+        candidate = self.config
+        if draft is not None and region is not None and region.rule_group_id == draft.id:
+            candidate = replace(self.config, rule_groups=[*self.config.rule_groups, draft])
+        else:
+            self._draft_task_rule = None
+        started = self.save_coordinator.request_save(candidate, action, region, index)
         if not started:
             self._pending_save = None
             self._set_saving(False)
@@ -1051,11 +1099,10 @@ class MainWindow(QMainWindow):
             (item for item in self.config.regions if item.id == region.id), None
         )
         self.logger.info(
-            "区域配置变更 action=%s region_id=%s alias=%s title_fp=%s previous_title_fp=%s "
+            "区域配置变更 action=%s region_id=%s title_fp=%s previous_title_fp=%s "
             "rect=(%d,%d,%d,%d) frame=%dx%d backend=%s enabled=%s",
             action,
             region.id,
-            region.alias,
             title_fingerprint(region.window_title),
             title_fingerprint(previous.window_title) if previous else "",
             region.rect.x,
@@ -1079,6 +1126,14 @@ class MainWindow(QMainWindow):
         if action != "config":
             try:
                 apply_region_change(self.config, action, region, index)
+                draft = getattr(self, "_draft_task_rule", None)
+                if draft is not None and region is not None and region.rule_group_id == draft.id:
+                    self.config.rule_groups = [*self.config.rule_groups, draft]
+                    self.rule_workspace.add_committed_group(draft)
+                    self._draft_task_rule = None
+                if action in {"toggle", "update"} and self.service and region:
+                    self.service.apply_saved_region(region)
+                    self._paused_for_edit = None
             except (ValueError, KeyError) as error:
                 # 磁盘已写入但内存定位失败：必须留痕并提示，不能静默留半套状态。
                 self.logger.exception("区域配置已写入但内存提交失败：%s", error)
@@ -1125,6 +1180,7 @@ class MainWindow(QMainWindow):
         """
         if self._shutdown_started:
             return
+        self._restore_live_edit()
         action, region, index = self._pending_save or (result.action, None, None)
         self.logger.warning(
             "区域配置保存失败 action=%s stage=%s region_alias=%s error=%s",
@@ -1244,12 +1300,14 @@ class MainWindow(QMainWindow):
                 self.logger.info("区域添加：用户取消，未写盘")
                 return
             region = dialog.region()
+            options = getattr(dialog, "task_options", None)
+            self._draft_task_rule = options.draft_rule() if options else None
         finally:
             _delete_dialog_later(dialog)
         # 校验由 region_save.validate_region_config 在后台复核；这里只负责提交。
         self.logger.info(
-            "区域添加：提交保存 alias=%s hwnd=%s rect=(%d,%d,%d,%d) frame=%dx%d backend=%s",
-            region.alias,
+            "区域添加：提交保存 id=%s hwnd=%s rect=(%d,%d,%d,%d) frame=%dx%d backend=%s",
+            region.id,
             region.window_hwnd,
             region.rect.x,
             region.rect.y,
@@ -1277,25 +1335,50 @@ class MainWindow(QMainWindow):
                 return
             index = self.config.regions.index(region)
             dialog = RegionEditDialog(self, region)
+            live = self._live_task_service()
+            if live:
+                dialog.capture_client = live.capturer.client
+                if region.enabled:
+                    live.pause_region(region.id)
+                    self._paused_for_edit = (live, region.id)
             dialog.taken_aliases = {
                 item.alias.strip() for item in self.config.regions if item.id != region.id
             }
             self.logger.info("区域重新校准：打开对话框 region_id=%s", region.id)
+            submitted = False
             try:
                 if dialog.exec() != QDialog.DialogCode.Accepted:
                     self.logger.info("区域重新校准：用户取消 region_id=%s", region.id)
                     return
                 candidate = dialog.region()
+                options = getattr(dialog, "task_options", None)
+                self._draft_task_rule = options.draft_rule() if options else None
+                submitted = self._request_region_save("update", candidate, index)
             finally:
                 _delete_dialog_later(dialog)
-            self._request_region_save("update", candidate, index)
+                if not submitted:
+                    self._restore_live_edit()
 
         # 先停监控、后保存：圈选要抓目标窗口整帧，不能与运行中的采集并发。
-        self._after_stop(proceed)
+        if self._live_task_service():
+            proceed()
+        else:
+            self._after_stop(proceed)
+
+    def _live_task_service(self):
+        service = self.service
+        client = getattr(getattr(service, "capturer", None), "client", None)
+        return service if getattr(client, "persistent", False) is True else None
+
+    def _restore_live_edit(self):
+        paused = getattr(self, "_paused_for_edit", None)
+        self._paused_for_edit = None
+        if paused and paused[0] is self.service:
+            self.service.resume_region(paused[1])
 
     @config_slot("暂停 / 启用区域")
     def toggle_region(self) -> None:
-        reason = self._config_action_gate(allow_auto_stop=False)
+        reason = self._config_action_gate(allow_auto_stop=bool(self._live_task_service()))
         if reason:
             QMessageBox.information(self, "暂时不能修改区域状态", reason)
             return
@@ -1378,6 +1461,8 @@ class MainWindow(QMainWindow):
         self._request_region_save("update", candidate, index)
 
     def _delivery_mode(self) -> str:
+        if isinstance(getattr(self, "dispatcher", None), DeliveryRoutes):
+            return "feishu" if self.dispatcher.routes() else "local"
         return "local" if self.config.notification_mode == "local" or (self.config.notification_mode == "auto" and not self.webhook) else "feishu"
 
     def _events_revision(self):
@@ -1388,6 +1473,20 @@ class MainWindow(QMainWindow):
         self._event_view_revision += 1
         self._records_signature = None
         self.refresh_records(force=True)
+
+    def activity_search_args(self):
+        search = getattr(self, "_activity_search", None)
+        return {"search": search} if search else {}
+
+    def set_activity_search(self, task, text, hours):
+        search = RecordSearch(task.strip(), text.strip(), int(hours or 0))
+        self._activity_search = search if search != RecordSearch() else None
+        self._recognition_page = 0
+        self._recognition_view_revision += 1
+        self._event_view_revision += 1
+        self._records_signature = self._candidates_signature = None
+        self.refresh_records(force=True)
+        self.refresh_recognition(force=True)
 
     def _decision_rules(self) -> RuleEngine:
         return RuleEngine(
@@ -1511,6 +1610,47 @@ class MainWindow(QMainWindow):
         self.auto_start.setChecked(self.config.auto_start)
         self.poll_seconds.setValue(self.config.poll_interval_ms // 1000)
         self.record_limit.setValue(self.config.recognition_record_limit)
+        self._refresh_test_targets()
+
+    def _refresh_test_targets(self):
+        self.test_target.clear()
+        self.test_target.addItem("飞书机器人", "")
+        for item in self.destination_settings.get("targets", []):
+            target = QQTarget(**item)
+            if target.enabled:
+                self.test_target.addItem(target.alias, target.id)
+        if self._destinations_load_error:
+            self.manage_destinations.setText("QQ 接收端配置无法读取")
+
+    def edit_destinations(self):
+        if self._settings_busy or self._saving or self._shutdown_started:
+            return
+        if self._destinations_load_error:
+            QMessageBox.warning(self, "无法读取接收端", "请核对 Windows 用户和备份。原文件已保留。")
+            return
+        if self.service or self._stopping_service:
+            QMessageBox.information(self, "接收端配置", "请先暂停监测，待停止完成后再更换接收端。")
+            return
+        from .destinations import DestinationsDialog
+
+        feishu = destination_id("feishu", self.webhook) if self.webhook else ""
+        dialog = DestinationsDialog(self.destination_settings, self.config.regions, feishu, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        settings = dialog.settings
+        self._settings_busy = True
+        self.settings_save_button.setEnabled(False)
+
+        def save():
+            error = ""
+            try:
+                self.destination_store.save(settings)
+            except Exception:
+                error = "接收端未保存，请检查数据目录和 Windows 用户权限。"
+            self.bridge.settings_saved.emit({"kind": "destinations", "settings": settings, "error": error})
+
+        self._settings_thread = threading.Thread(target=save, name="destination-save", daemon=True)
+        self._settings_thread.start()
 
     @config_slot("保存设置")
     def save_settings(self) -> None:
@@ -1566,6 +1706,13 @@ class MainWindow(QMainWindow):
         if self._shutdown_started:
             return
         self.settings_save_button.setEnabled(True)
+        if result.get("kind") == "destinations":
+            if not result["error"]:
+                self.destination_settings = result["settings"]
+                self.dispatcher.configure(self.config.notification_mode, self._credential_snapshot, self.destination_settings)
+                self._refresh_test_targets()
+            self.statusBar().showMessage(result["error"] or "通知接收端已保存", 5000)
+            return
         if result.get("kind") == "rules":
             self.rule_workspace.save_button.setEnabled(True)
             if result["config"] is not None:
@@ -1590,6 +1737,8 @@ class MainWindow(QMainWindow):
         if result["credentials"] is not None:
             self.webhook, self.secret = result["credentials"]
             self._credential_snapshot = (self.webhook, self.secret)
+        if isinstance(getattr(self, "dispatcher", None), DeliveryRoutes):
+            self.dispatcher.configure(self.config.notification_mode, self._credential_snapshot, self.destination_settings)
         if result["error"]:
             self.statusBar().showMessage(result["error"])
             QMessageBox.warning(self, "设置保存未完成", result["error"])
@@ -1601,7 +1750,13 @@ class MainWindow(QMainWindow):
 
     def send_test(self) -> None:
         """仅由此按钮触发真实试发；网络请求在后台线程。"""
+        if self.config.notification_mode == "local" or self._settings_busy or self._shutdown_started:
+            self.statusBar().showMessage("请先保存启用外发的设置，再选择试发接收端。", 5000)
+            return
         self.test_button.setEnabled(False)
+        target_id = self.test_target.currentData()
+        targets = [QQTarget(**item) for item in self.destination_settings.get("targets", [])]
+        target = next((item for item in targets if item.id == target_id and item.enabled), None)
         webhook = self.webhook_edit.text().strip()
         secret = self.secret_edit.text().strip()
         payload = {
@@ -1614,12 +1769,31 @@ class MainWindow(QMainWindow):
         }
 
         def run() -> None:
+            def before_request():
+                if self._shutdown_started or self.config.notification_mode == "local" or (
+                    target_id and target_id not in self.dispatcher.routes()
+                ):
+                    raise NotifyError("外发已关闭或接收端已更改")
             try:
-                FeishuClient(webhook, secret).send(payload)
+                if target is None and not target_id:
+                    FeishuClient(webhook, secret).send(payload, before_request=before_request)
+                    message = "飞书已明确接受测试消息。"
+                elif target is not None and target.kind == "qq":
+                    QQClient(target).send(payload, now=time.time(), start_part=0, before_request=before_request,
+                                          on_part_sent=lambda _: None)
+                    message = "腾讯已接受测试消息，请在目标 QQ 会话中核对。"
+                elif target is not None:
+                    receipts = []
+                    client = PushPlusClient(target)
+                    client.send_tracked(payload, now=time.time(), before_request=before_request,
+                                        receipt="", on_receipt=receipts.append)
+                    message = "PushPlus 已受理测试消息，请在目标 QQ 会话中核对。"
+                else:
+                    raise NotifyError("接收端已变更，请重新选择")
             except Exception as error:
                 self.bridge.test_result.emit(f"测试失败：{error}")
             else:
-                self.bridge.test_result.emit("飞书已明确接受测试消息；这不代表手机已响铃或已读。")
+                self.bridge.test_result.emit(message)
 
         threading.Thread(target=run, name="user-requested-feishu-test", daemon=True).start()
 
@@ -1665,7 +1839,7 @@ class MainWindow(QMainWindow):
         if not self.config.keywords and not any(g.enabled for g in self.config.rule_groups):
             QMessageBox.warning(self, "无法启动", "请先在规则页保存一个规则组或兼容关键词。")
             return
-        if self._delivery_mode() == "feishu" and not self.webhook:
+        if self.config.notification_mode == "feishu" and not self.webhook:
             QMessageBox.warning(self, "无法启动", "请先在设置页保存飞书 Webhook 和签名密钥。")
             return
         groups = {group.id: group for group in self.config.rule_groups if group.enabled}
@@ -1825,9 +1999,9 @@ class MainWindow(QMainWindow):
                 self.logger.exception("停止后继续执行的配置变更失败")
 
     def on_events(self, events: list[MatchEvent]) -> None:
-        if events:
+        if events and not self.storage.local_notifications_muted():
             self.tray.showMessage(
-                "已本地记录" if self._delivery_mode() == "local" else "提醒已提交飞书队列",
+                "已本地记录" if all(event.state == "local" for event in events) else "监测规则已命中",
                 "；".join(f"{event.region_alias} / {event.keyword}" for event in events[:3]),
                 QSystemTrayIcon.MessageIcon.Information,
                 3000,
@@ -1865,7 +2039,7 @@ class MainWindow(QMainWindow):
             # 用户停用：结束故障事件，但这不是“恢复成功”，不发恢复通知。
             self.active_faults.pop(health.region_id, None)
             self.capture_incidents.recover(health.region_id)
-        elif current == RegionStatus.PAUSED.value and previous != current:
+        elif current == RegionStatus.PAUSED.value and previous != current and not self.storage.local_notifications_muted():
             # 窗口最小化 / 桌面锁定 / 未就绪属于可恢复暂停：只提示托盘，
             # 不结束故障事件，也不写通知队列。
             self.tray.showMessage(
@@ -1987,11 +2161,25 @@ class MainWindow(QMainWindow):
             return False
         self._announced_health_ids.append(event_id)
         self._announced_health_ids = self._announced_health_ids[-128:]
-        self.tray.showMessage(keyword, text, QSystemTrayIcon.MessageIcon.Warning, 3500)
+        if not self.storage.local_notifications_muted():
+            self.tray.showMessage(keyword, text, QSystemTrayIcon.MessageIcon.Warning, 3500)
         return True
+
+    def _show_local_digest(self, count):
+        if count and not self._shutdown_started and not self.storage.local_notifications_muted():
+            self.tray.showMessage("免打扰摘要", f"共记录 {count} 条命中，可在活动记录查看。",
+                                  QSystemTrayIcon.MessageIcon.Information, 3500)
 
     def check_notification_health(self) -> None:
         self.notification_health_checked_at = time.time()
+        if self.storage.quiet_hours.summary and not (self._digest_thread and self._digest_thread.is_alive()):
+            def digest():
+                count = self.storage.flush_local_digest(ttl_seconds=self.config.event_ttl_seconds)
+                if count:
+                    self.bridge.local_digest.emit(count)
+
+            self._digest_thread = threading.Thread(target=digest, name="local-notification-digest", daemon=True)
+            self._digest_thread.start()
         for transition in self.dispatcher.poll_delivery_health_events():
             self.queue_system_message(
                 "通知连接异常" if transition.kind == "failed" else "通知连接恢复",
@@ -2196,6 +2384,9 @@ class MainWindow(QMainWindow):
             ])
             if record.get("last_error"):
                 fields.append(("最近错误", str(record["last_error"])))
+            for delivery in record.get("deliveries", []):
+                fields.append((self.dispatcher.label(delivery["endpoint_id"]),
+                               delivery_label(delivery["state"]) + (" · " + delivery["last_error"] if delivery.get("last_error") else "")))
         else:
             fields.extend([("命中词", ", ".join(json.loads(record["matched_keywords"])) or "—"),
                            ("处理结果", decision_label(record["decision"]))])
@@ -2262,6 +2453,7 @@ class MainWindow(QMainWindow):
         if service:
             service.request_stop()
         self.dispatcher.request_stop()
+        stop_bindings()
 
         def shutdown() -> None:
             if service:
@@ -2282,7 +2474,10 @@ class MainWindow(QMainWindow):
                 self._recognition_thread.join()
             if self._settings_thread:
                 self._settings_thread.join()
+            if self._digest_thread:
+                self._digest_thread.join()
             wait_ui_workers(pending_preview_workers)
+            wait_bindings()
             self.recognition.close()
             self.bridge.shutdown_finished.emit()
 

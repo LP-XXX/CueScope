@@ -29,7 +29,7 @@ try:  # Pillow 只用于合成帧；缺失时相关用例整体跳过。
 except Exception:  # pragma: no cover - 环境缺 Pillow
     _PIL_AVAILABLE = False
 
-_FONT_PATH = Path("C:/Windows/Fonts/msyh.ttc")
+_FONT_PATH = Path(__file__).parent / "fixtures/fonts/CueScopeFixtureSans.otf"
 _READY = _PIL_AVAILABLE and _FONT_PATH.is_file()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -173,7 +173,7 @@ def _messages(blocks, uncovered=()) -> list:
     return blocks_to_messages(OcrObservation("r1", 1.0, 1, list(blocks), list(uncovered)))
 
 
-@unittest.skipUnless(_READY, "缺少 Pillow 或微软雅黑字体，跳过合成帧用例")
+@unittest.skipUnless(_READY, "缺少 Pillow 或合成测试字体，跳过合成帧用例")
 class DynamicBorderTests(unittest.TestCase):
     """OCR 动态描边余量：11px 描边不能吃掉面板，2px 真实帧行为不变。"""
 
@@ -234,7 +234,7 @@ class DynamicBorderTests(unittest.TestCase):
         self.assertTrue(panels[0].certain)
 
 
-@unittest.skipUnless(_READY, "缺少 Pillow 或微软雅黑字体，跳过合成帧用例")
+@unittest.skipUnless(_READY, "缺少 Pillow 或合成测试字体，跳过合成帧用例")
 class SpliceRegressionTests(unittest.TestCase):
     """已修回归不得被本轮描边改动破坏（真实尺寸帧复测）。"""
 
@@ -291,12 +291,15 @@ class FinalizePackageTests(unittest.TestCase):
         self.dist.mkdir(parents=True)
         self.reports.mkdir(parents=True)
         (self.dist / "CueScope.exe").write_bytes(b"synthetic-exe")
+        manifest = self.reports / f"frozen-payload-{self.version}.sha256"
+        manifest.write_text(hashlib.sha256(b"synthetic-exe").hexdigest() + "  CueScope.exe\n", encoding="utf-8")
         for name in (
             "README.md", "QUICK_START.md", "PLAN_STATUS.md", "VALIDATION.md",
             "AGENTS.md", "requirements.lock", "THIRD_PARTY_NOTICES.md", "LICENSE",
         ):
             (self.root / name).write_text(f"# synthetic {name}\n", encoding="utf-8")
         (self.root / "packaging").mkdir()
+        (self.root / "packaging/PORTABLE_README.md").write_text("# Offline guide\n", encoding="utf-8")
         (self.root / "packaging" / "capture-requirements.lock").write_text(
             "numpy==2.2.6\nopencv-python==5.0.0.93\nwindows-capture==2.0.1\n",
             encoding="utf-8",
@@ -420,6 +423,7 @@ class FinalizePackageTests(unittest.TestCase):
         self.run_main()
         self.assertTrue((self.dist / "SHA256SUMS.txt").is_file())
         self.assertTrue((self.dist / "README.md").is_file())
+        self.assertEqual((self.dist / "README.md").read_text(encoding="utf-8"), "# Offline guide\n")
         archive = self.module.ARCHIVE
         self.assertTrue(archive.is_file(), "未生成 zip")
         with zipfile.ZipFile(archive) as bundle:

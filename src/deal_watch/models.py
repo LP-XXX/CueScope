@@ -216,6 +216,8 @@ class NotificationJob:
     next_attempt_at: float = 0.0
     last_error: str = ""
     updated_at: float = 0.0
+    receipt: str = ""
+    next_part: int = 0
 
 
 @dataclass(slots=True)

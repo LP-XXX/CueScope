@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import hashlib
 import json
 import os
 import sys
 from ctypes import wintypes
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 from .config import default_data_dir, validate_webhook_url
 
@@ -76,3 +78,47 @@ class CredentialStore:
 
     def clear(self) -> None:
         self.path.unlink(missing_ok=True)
+
+
+def destination_id(kind: str, *identity_parts: str) -> str:
+    """Bind to an exact provider/account/recipient without publishing its address."""
+    if not isinstance(kind, str) or not kind.isascii() or not kind.isidentifier():
+        raise ValueError("渠道类型无效")
+    if not identity_parts or any(not isinstance(part, str) or not part.strip() for part in identity_parts):
+        raise ValueError("接收端身份不能为空")
+    raw = json.dumps([kind, *identity_parts], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return f"{kind}-{hashlib.sha256(raw).hexdigest()}"
+
+
+class DestinationCredentialStore:
+    """Atomic, DPAPI-protected channel configuration; legacy credentials remain readable."""
+
+    def __init__(self, data_dir: Path | None = None):
+        self.path = (data_dir or default_data_dir()) / "notification-destinations.dpapi"
+
+    def load(self) -> dict:
+        if not self.path.exists():
+            return {}
+        value = json.loads(unprotect(self.path.read_bytes()).decode("utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError("通知目标配置无效")
+        return value
+
+    def save(self, value: dict) -> None:
+        if not isinstance(value, dict):
+            raise ValueError("通知目标配置无效")
+        raw = json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        encrypted = protect(raw)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with NamedTemporaryFile(dir=self.path.parent, prefix="destinations-", suffix=".tmp", delete=False) as tmp:
+            temporary = Path(tmp.name)
+        try:
+            with temporary.open("wb") as handle:
+                handle.write(encrypted)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if unprotect(temporary.read_bytes()) != raw:
+                raise OSError("通知目标配置校验失败")
+            os.replace(temporary, self.path)
+        finally:
+            temporary.unlink(missing_ok=True)

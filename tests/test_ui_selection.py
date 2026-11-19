@@ -450,6 +450,8 @@ class DialogScreenPlacementTests(unittest.TestCase):
     def test_display1_rect_comes_from_win32_not_from_qt_primary(self):
         """用 Win32 确认 DISPLAY1；Qt 主屏不等于屏幕 1，不能互相替代。"""
         monitors = win32_monitors()
+        if os.environ.get("CUESCOPE_HEADLESS_CI") == "1" and win32_display1_rect() is None:
+            self.skipTest("Hosted Windows runner has no physical DISPLAY1")
         self.assertTrue(monitors, "Win32 没有枚举到任何显示器")
         display1 = win32_display1_rect()
         self.assertIsNotNone(display1, r"未找到 \\.\DISPLAY1；禁止在非 DISPLAY1 上做占屏测试")

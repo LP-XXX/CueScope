@@ -11,7 +11,7 @@ import shutil
 import sys
 import tomllib
 import zipfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from packaging.requirements import Requirement
 
@@ -32,6 +32,7 @@ def project_version() -> str:
 
 
 VERSION = project_version()
+EVIDENCE_DIR = None
 DIST = ROOT / "dist" / f"CueScope-{VERSION}"
 ARCHIVE = ROOT / "dist" / f"CueScope-{VERSION}-win-x64.zip"
 
@@ -146,7 +147,7 @@ def collect_capture_licenses() -> list[dict]:
 
 def collect_licenses() -> None:
     """将运行依赖 wheel 中的许可证实际随包分发，而非只列网页链接。"""
-    pending = ["mss", "numpy", "PySide6", "rapidocr", "onnxruntime", "pillow"]
+    pending = ["mss", "numpy", "PySide6", "rapidocr", "onnxruntime", "pillow", "requests"]
     visited: set[str] = set()
     inventory = []
     while pending:
@@ -220,7 +221,7 @@ def validate_source_reports() -> None:
     Raises:
         ValueError: 某个将要拷贝的报告自证版本与本包不符，或不是合法 JSON。
     """
-    reports = ROOT / "build" / "validation"
+    reports = EVIDENCE_DIR or ROOT / "build" / "validation"
     problems: list[str] = []
     for source_name, target_name in VALIDATION_REPORTS:
         source = reports / source_name
@@ -240,7 +241,7 @@ def validate_source_reports() -> None:
 
 def copy_validation_reports() -> list[str]:
     """按显式清单拷贝验证报告，返回包内实际落地的文件名列表。"""
-    reports = ROOT / "build" / "validation"
+    reports = EVIDENCE_DIR or ROOT / "build" / "validation"
     target_dir = DIST / "validation"
     target_dir.mkdir(parents=True, exist_ok=True)
     copied: list[str] = []
@@ -316,7 +317,14 @@ def verify_required_evidence() -> None:
         raise ValueError("source-snapshot.json 为空或格式非法")
     drifted: list[str] = []
     for relative, expected in snapshot.items():
+        parts = relative.split("/")
+        if (any(part in {"", ".", ".."} for part in parts) or "\\" in relative
+                or PureWindowsPath(relative).drive or not isinstance(expected, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", expected)):
+            raise ValueError("源码指纹含无效路径或摘要")
         path = ROOT / relative
+        if not path.resolve().is_relative_to(ROOT.resolve()):
+            raise ValueError("源码指纹路径越界")
         if not path.is_file():
             drifted.append(f"{relative}: 文件已不存在")
             continue
@@ -371,11 +379,32 @@ def verify_public_contents() -> None:
                          + "\n  ".join(problems[:20]))
 
 
+def verify_frozen_payload() -> None:
+    """Reject additions and changed bytes in the runtime since PyInstaller generated its manifest."""
+    from checksums import file_hash
+
+    runtime_dirs = {"_internal", "capture-component"}
+    expected = {}
+    reports = EVIDENCE_DIR or ROOT / "build" / "validation"
+    for line in (reports / f"frozen-payload-{VERSION}.sha256").read_text(encoding="utf-8").splitlines():
+        digest, separator, relative = line.partition("  ")
+        if not separator or not re.fullmatch(r"[0-9a-f]{64}", digest) or relative in expected:
+            raise ValueError("Invalid build-time runtime manifest")
+        if relative.split("/")[0] in runtime_dirs or relative == "CueScope.exe":
+            expected[relative] = digest
+    actual = {f.relative_to(DIST).as_posix(): file_hash(f)
+              for folder in runtime_dirs for f in (DIST / folder).rglob("*") if f.is_file()}
+    actual["CueScope.exe"] = file_hash(DIST / "CueScope.exe")
+    if not expected or actual != expected:
+        raise ValueError("Runtime contents changed after building")
+
+
 def main(argv: list[str] | None = None) -> None:
-    global DIST, ARCHIVE
+    global DIST, ARCHIVE, EVIDENCE_DIR
     parser = argparse.ArgumentParser(description="整理交付目录并生成 ZIP")
     parser.add_argument("--dist-root", default=str(ROOT / "dist"))
     parser.add_argument("--archive", default="")
+    parser.add_argument("--evidence-dir", type=Path)
     parser.add_argument(
         "--require-evidence",
         action="store_true", default=True,
@@ -385,6 +414,7 @@ def main(argv: list[str] | None = None) -> None:
         # 被验收用例 import 后 ``main()`` 不应解析 pytest 自己的命令行参数。
         argv = sys.argv[1:] if __name__ == "__main__" else []
     args = parser.parse_args(argv)
+    EVIDENCE_DIR = args.evidence_dir.resolve() if args.evidence_dir else None
     DIST = Path(args.dist_root).resolve() / f"CueScope-{VERSION}"
     ARCHIVE = (
         Path(args.archive).resolve()
@@ -398,11 +428,13 @@ def main(argv: list[str] | None = None) -> None:
 
     if not (DIST / "CueScope.exe").is_file():
         raise FileNotFoundError("尚未生成 CueScope.exe")
+    verify_frozen_payload()
     for name in PUBLIC_DOCUMENTS:
-        shutil.copy2(ROOT / name, DIST / name)
+        source = ROOT / ("packaging/PORTABLE_README.md" if name == "README.md" else name)
+        shutil.copy2(source, DIST / name)
         internal = DIST / "_internal" / name
         if internal.is_file():
-            shutil.copy2(ROOT / name, internal)
+            shutil.copy2(source, internal)
     shutil.copy2(ROOT / "packaging" / "capture-requirements.lock", DIST / "capture-requirements.lock")
     collect_licenses()
     validate_source_reports()
