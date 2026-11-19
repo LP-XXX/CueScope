@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cuescope"
+version = "0.3.0"
+description = "Windows 本地窗口文字监测与提醒"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = {text = "MIT"}
+dependencies = [
+  "mss==10.1.0",
+  "numpy==2.2.6",
+  "PySide6==6.8.3",
+  "rapidocr==3.10.0",
+  "onnxruntime==1.20.1",
+]
+
+[project.optional-dependencies]
+test = ["pytest==8.3.5", "pytest-cov==6.1.1"]
+dev = ["ruff==0.11.7", "pyinstaller==6.13.0"]
+
+[project.scripts]
+cuescope = "deal_watch.__main__:main"
+deal-watch = "deal_watch.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/deal_watch"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"models/manifest.json" = "deal_watch/assets/model-manifest.json"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]

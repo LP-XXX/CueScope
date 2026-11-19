@@ -1,0 +1,32 @@
+# UTF-8
+#
+# Windows 版本资源**模板**：不含任何版本数字，构建时由 packaging/version_metadata.py
+# 按 pyproject.toml 的 project.version 渲染成 build/version_info.txt 再交给 PyInstaller。
+# 唯一真源是 pyproject.toml；这里写死一次就会在下次升版时让 EXE 属性显示旧版本。
+VSVersionInfo(
+    ffi=FixedFileInfo(
+        filevers=@@FILEVERS@@,
+        prodvers=@@PRODVERS@@,
+        mask=0x3f,
+        flags=0x0,
+        OS=0x40004,
+        fileType=0x1,
+        subtype=0x0,
+        date=(0, 0),
+    ),
+    kids=[
+        StringFileInfo([
+            StringTable('080404b0', [
+                StringStruct('CompanyName', ''),
+                StringStruct('FileDescription', 'CueScope 窗口文字监测与提醒'),
+                StringStruct('FileVersion', '@@VERSION@@'),
+                StringStruct('InternalName', 'CueScope.exe'),
+                StringStruct('LegalCopyright', 'Copyright (c) 2026 CueScope contributors — MIT License'),
+                StringStruct('OriginalFilename', 'CueScope.exe'),
+                StringStruct('ProductName', 'CueScope'),
+                StringStruct('ProductVersion', '@@VERSION@@'),
+            ]),
+        ]),
+        VarFileInfo([VarStruct('Translation', [2052, 1200])]),
+    ],
+)

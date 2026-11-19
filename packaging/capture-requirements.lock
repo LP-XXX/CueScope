@@ -1,0 +1,6 @@
+# Frozen Windows x64 capture component, separate from the main OCR environment.
+# NumPy comes only from the build interpreter; .capture-runtime/numpy is excluded.
+# OpenCV and windows-capture come from the isolated .capture-runtime wheels.
+numpy==2.2.6
+opencv-python==5.0.0.93
+windows-capture==2.0.1
